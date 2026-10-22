@@ -247,5 +247,16 @@ premitive components built on top of shadcn ui making it compatiable with our ex
 
 ```
 npx ai-elements@latest
+```
+
+```
 npx skills@latest add vercel/ai-elements
+```
+
+```
+npm install ai @ai-sdk/react zod
+```
+
+```
+npm skills@latest add vercel/ai
 ```
