@@ -7,6 +7,7 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"
 
 import { useIsMobile } from "@/hooks/use-mobile"
+import { SIDEBAR_COOKIE_MAX_AGE, SIDEBAR_COOKIE_NAME } from "@/lib/sidebar"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
@@ -25,12 +26,32 @@ import {
 } from "@/components/ui/tooltip"
 import { PanelLeftIcon } from "lucide-react"
 
-const SIDEBAR_COOKIE_NAME = "sidebar_state"
-const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 const SIDEBAR_WIDTH = "16rem"
 const SIDEBAR_WIDTH_MOBILE = "18rem"
-const SIDEBAR_WIDTH_ICON = "3rem"
+const SIDEBAR_WIDTH_ICON = "4rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+
+// The persisted state lives in a cookie and can only be read on the client,
+// so it is read through useSyncExternalStore instead of seeding the initial
+// state: the server and first hydration pass render with `defaultOpen`, and
+// the cookie snapshot takes over the moment hydration completes (before the
+// browser paints), so a refreshed page opens in its saved state without the
+// opposite state flashing first.
+function subscribeToSidebarCookie() {
+  // document.cookie fires no events, so there is nothing to listen to.
+  // Updates are picked up because the provider re-renders after writing the
+  // cookie, and that render re-reads the snapshot.
+  return () => {}
+}
+
+function readSidebarCookie(defaultOpen: boolean): boolean {
+  const cookie = document.cookie
+    .split("; ")
+    .find((c) => c.startsWith(`${SIDEBAR_COOKIE_NAME}=`))
+  if (!cookie) return defaultOpen
+  const value = cookie.slice(SIDEBAR_COOKIE_NAME.length + 1)
+  return value === "true" ? true : value === "false" ? false : defaultOpen
+}
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
@@ -69,21 +90,30 @@ function SidebarProvider({
   const isMobile = useIsMobile()
   const [openMobile, setOpenMobile] = React.useState(false)
 
-  // This is the internal state of the sidebar.
+  // This is the internal state of the sidebar, sourced from the cookie.
   // We use openProp and setOpenProp for control from outside the component.
-  const [_open, _setOpen] = React.useState(defaultOpen)
+  // `version` is bumped on every cookie write to force the snapshot above to
+  // re-read, since we cannot subscribe to cookie changes directly.
+  const [version, _setVersion] = React.useState(0)
+  const _open = React.useSyncExternalStore(
+    subscribeToSidebarCookie,
+    () => {
+      void version
+      return readSidebarCookie(defaultOpen)
+    },
+    () => defaultOpen
+  )
   const open = openProp ?? _open
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
       const openState = typeof value === "function" ? value(open) : value
       if (setOpenProp) {
         setOpenProp(openState)
-      } else {
-        _setOpen(openState)
       }
 
       // This sets the cookie to keep the sidebar state.
       document.cookie = `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE}`
+      _setVersion((v) => v + 1)
     },
     [setOpenProp, open]
   )

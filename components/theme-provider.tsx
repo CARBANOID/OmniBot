@@ -47,7 +47,9 @@ function ThemeHotkey() {
         return
       }
 
-      if (event.key.toLowerCase() !== "d") {
+      // Some key sources (IME composition, mobile keyboards, certain
+      // browsers/extensions) dispatch keydown with `key` undefined.
+      if (!event.key || event.key.toLowerCase() !== "d") {
         return
       }
 

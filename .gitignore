@@ -14,6 +14,7 @@
 # next.js
 /.next/
 /out/
+/drizzle/
 
 # production
 /build
@@ -38,3 +39,4 @@ pnpm-debug.log*
 *.tsbuildinfo
 next-env.d.ts
 .clerk/
+.neon
