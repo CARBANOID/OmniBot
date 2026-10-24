@@ -127,4 +127,15 @@
   html {
     @apply font-sans;
     }
+  /* Hide the browser's scrollbar UI everywhere while keeping scroll areas
+     fully scrollable (wheel/trackpad, keyboard, touch). */
+  * {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* legacy Edge/IE */
+    }
+  *::-webkit-scrollbar {
+    display: none; /* Chrome/Safari */
+    width: 0;
+    height: 0;
+    }
 }

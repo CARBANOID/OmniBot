@@ -44,6 +44,7 @@ import {
   SidebarMenuButton,
   SidebarRail,
 } from "@/components/ui/sidebar"
+import { contentColumnCenter } from "@/lib/content-center"
 import type { UserChat } from "@/queries/bots"
 
 // Clerk's UserButton ships its own trigger <button>, so it is hosted inside
@@ -97,6 +98,17 @@ export function AppSidebar({ chats }: AppSidebarProps) {
   const router = useRouter()
   const [createBotOpen, setCreateBotOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  // Horizontal center of the content column (the region right of the
+  // sidebar). Captured on open so the dialog — portaled to <body> and
+  // otherwise viewport-centered — lines up with the hero centered in that
+  // column (avatar, name, role). null = sidebar hidden (mobile), where the
+  // viewport center is already correct and class-based centering applies.
+  const [searchCenter, setSearchCenter] = useState<number | null>(null)
+
+  function openSearch() {
+    setSearchCenter(contentColumnCenter())
+    setSearchOpen(true)
+  }
 
   // Toggle the chat search with ⌘K / Ctrl+K.
   useEffect(() => {
@@ -107,6 +119,8 @@ export function AppSidebar({ chats }: AppSidebarProps) {
       if (!key) return
       if ((event.metaKey || event.ctrlKey) && key === "k") {
         event.preventDefault()
+        // Harmless to re-measure when toggling closed; the dialog is gone.
+        setSearchCenter(contentColumnCenter())
         setSearchOpen((open) => !open)
       }
     }
@@ -149,16 +163,14 @@ export function AppSidebar({ chats }: AppSidebarProps) {
             the input's lack of one. */}
         <Button
           type="button"
-          onClick={() => setSearchOpen(true)}
-          className="flex w-full min-w-0 items-center gap-2 rounded-lg border-input bg-transparent px-2.5 text-base text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm dark:hover:bg-muted/50 group-data-[collapsible=icon]:size-12 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-transparent"
+          onClick={openSearch}
+          className="flex w-full min-w-0 items-center gap-2 rounded-lg border-input bg-transparent px-2.5 text-base text-muted-foreground transition-colors group-data-[collapsible=icon]:size-12 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-transparent hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm dark:hover:bg-muted/50"
         >
           <SearchIcon />
           <span className="truncate group-data-[collapsible=icon]:hidden">
             Search
           </span>
-          <Kbd className="ml-auto group-data-[collapsible=icon]:hidden">
-            ⌘K
-          </Kbd>
+          <Kbd className="ml-auto group-data-[collapsible=icon]:hidden">⌘K</Kbd>
         </Button>
       </SidebarHeader>
       <SidebarContent>
@@ -230,6 +242,7 @@ export function AppSidebar({ chats }: AppSidebarProps) {
         onOpenChange={setSearchOpen}
         title="Search"
         description="Search your chats"
+        contentStyle={searchCenter != null ? { left: searchCenter } : undefined}
       >
         <Command>
           <CommandInput placeholder="Search your chats..." />

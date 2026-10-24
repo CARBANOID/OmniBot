@@ -32,7 +32,10 @@ npx -y firecrawl-cli@latest init --all --browser
 * use firecrawl to find all the companies building AI Agent TeamMates , summarize what are the most common features they offer 
 
 ## Clerk
+
+```
 npx skills@latest add clerk/skills
+```
 
 * Add authentication to this project using clerk skills
 
@@ -43,18 +46,17 @@ npx skills@latest add clerk/skills
 
 ## Neon for backend
 
-    ```
-        npm install -g neon@latest
-        neon init
-    ```
+```
+npm install -g neon@latest
+neon init
+```
 
-   for  Which region should the new project run in 
-     select : ❯   AWS US East 1 (N. Virginia) (aws-us-east-1) -> it has object storage
+for  Which region should the new project run in 
+select : ❯   AWS US East 1 (N. Virginia) (aws-us-east-1) -> it has object storage
 
-
-    ```
-        npx neon@latest skills -s neon -s neon-postgres -y
-    ```
+```
+npx neon@latest skills -s neon -s neon-postgres -y
+```
 
 * Set up Drizzle ORM with Neon
 * Add a simple todo list and push to database
@@ -80,12 +82,12 @@ npx skills@latest add clerk/skills
 
 cwa.run/ai-team-figma
 
-only logged in users should have access to the page 
-* use clerk skills to protect @app/page.tsx
-
-* ![home](pics/home.png) Replace @app/page.tsx content @components/ui/empty.tsx primitives composition to achieve look in the image attached .
-for the avatar / empty media pick a random image from our project , like a logo or favicon - do not build one yourself .
-use shadcn skills
+only logged in users should have access to the page :  
+* use clerk skills to protect @app/page.tsx  
+* ![home](pics/home.png)
+    * Replace @app/page.tsx content @components/ui/empty.tsx primitives composition to achieve look in the image attached .
+    for the avatar / empty media pick a random image from our project , like a logo or favicon - do not build one yourself .
+    use shadcn skills
 
 
 ## Avatar (https://www.dicebear.com/animated-avatars/)
@@ -258,5 +260,98 @@ npm install ai @ai-sdk/react zod
 ```
 
 ```
-npm skills@latest add vercel/ai
+npx skills@latest add vercel/ai
 ```
+
+Add these API Key to your enviroment variable
+```
+OPENAI_API_KEY=
+ANTHROPICS_API_KEY=
+GOOGLE_GENERATIVE_AI_API_KEY=
+XAI_API_KEY=
+```
+
+Packages
+```
+npm install ai @ai-sdk/openai @ai-sdk/anthropic @ai-sdk/google @ai-sdk/xai
+```
+(ANTHROPICS_API_KEY above was a typo — `@ai-sdk/anthropic` reads `ANTHROPIC_API_KEY`; dev server must restart to pick up new env)
+
+* Set up an AI chat in `app/(dashboard)/chats/[chatId]/page.tsx` using the `ai-sdk` and `ai-elements` skills
+
+    * Scope
+        * No database persistence for now; simplest possible setup — one route handler + the chat UI wired to it
+        * Follow AGENTS.md; for dialog construction use `components/bot-dialog.tsx` as the reference implementation
+    * Route handler (`app/api/chat/route.ts`)
+        * Accepts `messages`, `provider`, `model`, `apiKey`; resolves model through the provider registry (unknown pair → plain 400 before streaming); streams via the AI SDK (`streamText` + `createUIMessageStreamResponse`)
+    * Providers (`providers/<provider-name>.ts`: `google.ts`, `anthropic.ts`, `xai.ts`, `openai.ts` + `providers/index.ts` registry)
+        * Each exports metadata (id, display name, lucide icon), its model list, and a factory `(apiKey?) => provider` that returns an AI SDK provider instance
+        * Test path: Google with the key in `.env.local` (`GOOGLE_GENERATIVE_AI_API_KEY`); the provider's env fallback covers it — no UI key entry required for this to work
+    * Chat UI (`components/chat.tsx`, client component)
+        * `ChatConversation` + empty state: bot avatar (animated), name, job; user/assistant messages
+        * `CredentialsProvider` wraps the conversation; a helper line ("Choose a credential below to start chatting.") when no credential is selected
+        * Submit is disabled until a credential is selected AND there is text; every request body carries `{ provider: credential.provider, model: effectiveModelId, apiKey: credential.apiKey }`
+
+        
+    * Credentials — skeleton only (no DB table)
+        * Client state only, structured so persistence can be added later:
+            `components/credentials/{context,credential-picker,credential-dialog,model-picker}.tsx`
+            * `context.tsx`: `CredentialsProvider` + `useCredentials()` → `credentials: { id: nanoid(); name; provider: string; apiKey }[]`, `selectedId`, `add`/`remove`/`select`. `name` is a user-facing label (required in the Add dialog; picker search matches name + provider name)
+        * Two buttons in the prompt box footer (`PromptInputTools`)
+            * Credential button
+                * `PromptInputButton` (ghost): provider icon + name when selected, `PlusIcon` when not (size `sm` vs `icon-sm`)
+                * Do NOT pass a `tooltip` prop to any `PromptInputButton` that is also a `PopoverTrigger`/`DialogTrigger` render target — the trigger renders its own `<button>` → nested-button warning
+                * Click opens a DIALOG styled exactly like the sidebar's chat search bar (the `CommandDialog` usage in `components/app-sidebar.tsx`):
+                    - top edge at `top-1/3` (`translate-y-0`), no box padding (`Command`'s own `p-1` is the inset), identical box width (default content width, `sm:max-w-sm`), `rounded-xl! overflow-hidden`
+                    - `CommandInput` search over saved credentials; each item: provider icon + credential name on the left (truncates), provider name pinned to the far right on the right
+                        - right-alignment is `justify-between` with a left group (icon + name, `min-w-0`) and a right group (`shrink-0`) — NOT `ml-auto`, and the item must also carry `[&>svg:last-child]:hidden`: this project's `CommandItem` injects an invisible check icon with its own `ml-auto`, which silently splits the free flex space and leaves the provider name floating mid-line
+                    - "Add credential" pinned at the bottom of the command box — INSIDE `Command`, after `CommandList` (so the box's rounded corners clip it) — always visible regardless of the filter, hover-styled like a command item (no `border-t` divider)
+            * Model button
+                * Rendered ONLY when a credential is selected
+                * `PromptInputButton` (ghost, `sm`) labeled with the current model name; opens a popover (`w-64`) with a searchable list of the selected provider's models
+                * `align="start"` — the box's left edge lines up with the button's name, not centered over it
+                * When the credential (provider) changes, the model resolves to the new provider's first model — as DERIVED state, never a `useEffect` (lint rule `react-hooks/set-state-in-effect` rejects it)
+        * Add credential dialog
+            * Standard dialog (visible header, `Cancel` / `Add credential` footer, `sm:max-w-sm`, default padding); fields: Name (required; "a label you recognize when picking"), Provider (searchable command list with icon + name), API key (masked input + show/hide toggle); inline error for missing fields; draft resets on close
+            * Save: `add(credential)` + auto-select it + close
+    
+    * Shared dialog positioning rule (applies to BOTH search dialogs and the Add dialog)
+        * These dialogs portal to `<body>` and are centered on the VIEWPORT by class, but the page content — and the empty-state hero (avatar / name / job) — is centered on the content column right of the sidebar. Viewport centering visibly sits left of the hero; all three dialogs must center on the content column instead
+        * Helper (e.g. `lib/content-center.ts`): `contentColumnCenter()` — measures the `[data-slot='sidebar']` element and returns `(rect.right + window.innerWidth) / 2`; returns `null` when the sidebar is hidden/absent (mobile), where the default viewport centering is already correct
+        * The center is captured in the OPENING event handler (the search trigger's `onClick`, the ⌘K handler, the "Add credential" button's `onClick`) and applied as an inline `left` on the `DialogContent` (inline style beats the `left-1/2` class; the default `-translate-x-1/2` then centers the box on that point)
+        * Never capture with an effect keyed on `open` — `react-hooks/set-state-in-effect` forbids setState in effect bodies
+        * Base UI does NOT fire `onOpenChange` when the controlled `open` prop is set from outside — which is exactly how the "Add credential" button opens its dialog — so the Add dialog receives the measured center as a PROP from the opener and applies it to its `DialogContent` (same `top-1/3` anchor as the search bar)
+    * Definition of done
+        * Typecheck + lint clean for new/edited files (pre-existing `components/ai-elements/*` errors are not ours to fix)
+        * Google + credential flow: add a credential with a working key → model button appears → send → streamed assistant reply (watch DevTools: body carries `provider`, `model`, `apiKey`) 
+
+
+* make the @app/api/chat/route.ts auth protected use clerk skills
+* hide the browser defualt scroll bar
+
+
+* Schema
+// lib/db/schema.ts
+export const credentials = pgTable(
+  "credentials",
+  {
+    id: text("id").primaryKey().$default(() => nanoid()),
+
+    // Third-party id (Clerk user id: user_...).
+    userId: text("user_id").notNull(),
+
+    // Provider id from the code registry in @/providers ("google", "openai", …).
+    provider: text("provider").notNull(),
+
+    // Display name the user chose when adding it ("key-1").
+    name: text("name").notNull(),
+
+    // Unique api key and AES-256-GCM ciphertext, base64 — using crypto
+    apiKey: text("api_key").notNull(),
+
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [index("credentials_user_id_idx").on(t.userId)]
+)

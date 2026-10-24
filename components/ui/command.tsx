@@ -11,10 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  InputGroup,
-  InputGroupAddon,
-} from "@/components/ui/input-group"
+import { InputGroup, InputGroupAddon } from "@/components/ui/input-group"
 import { SearchIcon, CheckIcon } from "lucide-react"
 
 function Command({
@@ -38,12 +35,16 @@ function CommandDialog({
   description = "Search for a command to run...",
   children,
   className,
+  contentStyle,
   showCloseButton = false,
   ...props
 }: Omit<React.ComponentProps<typeof Dialog>, "children"> & {
   title?: string
   description?: string
   className?: string
+  // Inline styles for the DialogContent — e.g. a `left` that centers it over
+  // the content column instead of the viewport (see lib/content-center).
+  contentStyle?: React.CSSProperties
   showCloseButton?: boolean
   children: React.ReactNode
 }) {
@@ -58,6 +59,7 @@ function CommandDialog({
           "top-1/3 translate-y-0 overflow-hidden rounded-xl! p-0",
           className
         )}
+        style={contentStyle}
         showCloseButton={showCloseButton}
       >
         {children}
