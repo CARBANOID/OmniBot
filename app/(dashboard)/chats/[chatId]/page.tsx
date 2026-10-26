@@ -4,6 +4,7 @@ import { notFound } from "next/navigation"
 import { Chat } from "@/components/chat"
 import { ChatHeader } from "@/components/chat-header"
 import { getChat } from "@/queries/chat"
+import { getUserCredentials } from "@/queries/credentials"
 
 export default async function ChatPage({
   params,
@@ -20,12 +21,15 @@ export default async function ChatPage({
   // leak ownership, so both simply come back as null.
   if (!chat) notFound()
 
+  // Seeds the credentials context; metadata only — the keys stay server-side.
+  const credentialSeeds = await getUserCredentials()
+
   // h-svh pins the column to the viewport so only the conversation scrolls
   // (StickToBottom) and the prompt box stays fixed in the bottom.
   return (
     <div className="flex h-svh min-w-0 flex-1 flex-col overflow-hidden">
       <ChatHeader name={chat.name} bot={chat.bot} />
-      <Chat bot={chat.bot} />
+      <Chat bot={chat.bot} credentials={credentialSeeds} />
     </div>
   )
 }

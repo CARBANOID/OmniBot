@@ -4,8 +4,10 @@ import { useState } from "react"
 import { KeyRoundIcon, PlusIcon } from "lucide-react"
 
 import { AddCredentialDialog } from "./credential-dialog"
+import { CredentialEditDialog } from "./credential-edit-dialog"
 import { useCredentials } from "./context"
 import { PromptInputButton } from "@/components/ai-elements/prompt-input"
+import { ProviderIcon } from "@/components/provider-icon"
 import { contentColumnCenter } from "@/lib/content-center"
 import { providers } from "@/providers"
 import {
@@ -32,7 +34,7 @@ import {
  * dialog.
  */
 export function CredentialPicker() {
-  const { credentials, credential, provider, selectedId, select } = useCredentials()
+  const { credentials, credential, selectedId, select } = useCredentials()
 
   const [open, setOpen] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
@@ -48,6 +50,10 @@ export function CredentialPicker() {
   // the dialog has fully closed (onOpenChangeComplete), so the footer's
   // selection change doesn't land while the dialog is still animating out.
   const [pendingId, setPendingId] = useState<string | null>(null)
+  // True when the user re-picked the ACTIVE credential: that opens the
+  // editor (update/delete, like the bot editor in the chat header) instead
+  // of a re-select.
+  const [editOpen, setEditOpen] = useState(false)
 
   function openSearch() {
     setCenter(contentColumnCenter())
@@ -68,35 +74,20 @@ export function CredentialPicker() {
       >
         <DialogTrigger
           render={
-            // PromptInputButton sizes from child count, but a fragment counts
-            // as 1 — pin the size: square icon when empty, pill with the
-            // provider name when selected.
+            // Always the square key icon, whether or not a credential is
+            // selected — the selection shows on its own button (see
+            // CredentialEditButton), and this one opens the search bar.
             <PromptInputButton
-              variant="ghost"
-              size={provider ? "sm" : "icon-sm"}
+              // Outline (bordered) so it reads as a deliberate, visible
+              // action next to the submit button, instead of a faint ghost.
+              variant="outline"
+              size="icon-sm"
+              aria-label="Choose a credential"
               onClick={openSearch}
             />
           }
         >
-          {provider && credential ? (
-            <>
-              {(() => {
-                const Icon = provider.icon
-                return <Icon className="size-4" />
-              })()}
-              {/* provider_name(key name); full name under 13 chars, longer
-                  keys truncated to 13 + ellipsis to keep the pill compact */}
-              <span className="max-w-48 truncate text-sm">
-                {provider.name} (
-                {credential.name.length > 20
-                  ? `${credential.name.slice(0, 20)}…`
-                  : credential.name}
-                )
-              </span>
-            </>
-          ) : (
-            <KeyRoundIcon className="size-4" />
-          )}
+          <KeyRoundIcon className="size-5" />
         </DialogTrigger>
         <DialogContent
           // Same geometry AND size as the sidebar's bot search bar
@@ -122,7 +113,6 @@ export function CredentialPicker() {
                   return 0
                 }).map((item) => {
                   const itemProvider = providers[item.provider]
-                  const Icon = itemProvider?.icon
                   // name left, provider pinned rightmost; hide the
                   // CommandItem's injected (unused) check icon, whose own
                   // ml-auto would otherwise split the space and prevent the
@@ -132,6 +122,13 @@ export function CredentialPicker() {
                       key={item.id}
                       value={`${item.name} ${itemProvider?.name ?? ""}`}
                       onSelect={() => {
+                        if (item.id === selectedId) {
+                          // Re-picking the active credential opens its
+                          // editor; a fresh pick queues a selection.
+                          setOpen(false)
+                          setEditOpen(true)
+                          return
+                        }
                         // Queue the pick; the commit happens in
                         // onOpenChangeComplete, once the dialog is closed.
                         setPendingId(item.id)
@@ -142,7 +139,7 @@ export function CredentialPicker() {
                       {/* Keep icon + name together on the left; the name
                           truncates so the provider keeps its slot. */}
                       <span className="flex min-w-0 items-center gap-2">
-                        {Icon ? <Icon className="size-4 shrink-0" /> : null}
+                        {itemProvider ? <ProviderIcon provider={itemProvider} /> : null}
                         <span className="truncate">{item.name}</span>
                       </span>
                       {itemProvider && (
@@ -178,6 +175,17 @@ export function CredentialPicker() {
         onOpenChange={setAddOpen}
         center={center}
       />
+      {/* Only reachable while a credential is selected (re-picking it is
+          what opens the editor); render once so its form state is stable.
+          `credential ?` guards the TS narrowing. */}
+      {credential && (
+        <CredentialEditDialog
+          credential={credential}
+          open={editOpen}
+          onOpenChange={setEditOpen}
+          center={center}
+        />
+      )}
     </>
   )
 }

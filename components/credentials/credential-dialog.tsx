@@ -1,11 +1,12 @@
 "use client"
 
 import { useState } from "react"
-import { nanoid } from "nanoid"
 import { EyeIcon, EyeOffIcon } from "lucide-react"
 
+import { createCredential } from "@/actions/credential"
 import { useCredentials } from "./context"
 import { Button } from "@/components/ui/button"
+import { ProviderIcon } from "@/components/provider-icon"
 import {
   Dialog,
   DialogClose,
@@ -22,6 +23,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { toast } from "@/components/ui/toast"
 import {
   Popover,
   PopoverContent,
@@ -51,8 +53,9 @@ export interface AddCredentialDialogProps {
 
 /**
  * "Add credential" dialog: a name, a searchable provider list, and an
- * API key input. Plain local state (placeholder, no DB table) — saving adds
- * the credential to the credentials context and selects it.
+ * API key input. Saving posts to the createCredential server action
+ * (encrypted at rest) and, on success, adds + selects it in the
+ * credentials context.
  */
 export function AddCredentialDialog({
   open,
@@ -66,6 +69,7 @@ export function AddCredentialDialog({
   const [providerOpen, setProviderOpen] = useState(false)
   const [apiKey, setApiKey] = useState("")
   const [showKey, setShowKey] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const provider = providerList.find((p) => p.id === providerId) ?? null
@@ -84,7 +88,7 @@ export function AddCredentialDialog({
     onOpenChange(next)
   }
 
-  function onSave() {
+  async function onSave() {
     if (!name.trim()) {
       setError("Enter a name.")
       return
@@ -97,20 +101,36 @@ export function AddCredentialDialog({
       setError("Enter the API key.")
       return
     }
-    const credential = {
-      id: nanoid(),
-      name: name.trim(),
-      provider: providerId,
-      apiKey: apiKey.trim(),
+    if (saving) return
+    setSaving(true)
+    try {
+      // Server action: validates against the registry AND the insert schema,
+      // encrypts the key, and returns the new id for selection.
+      const result = await createCredential({
+        name: name.trim(),
+        provider: providerId,
+        apiKey: apiKey.trim(),
+      })
+      if (!result.ok) {
+        setError(result.error)
+        return
+      }
+      add({ id: result.id, name: name.trim(), provider: providerId })
+      select(result.id)
+      toast.add({
+        type: "success",
+        title: "Credential added",
+        description: `${name.trim()} was saved.`,
+      })
+      setName("")
+      setProviderId(null)
+      setApiKey("")
+      setShowKey(false)
+      setError(null)
+      onOpenChange(false)
+    } finally {
+      setSaving(false)
     }
-    add(credential)
-    select(credential.id)
-    setName("")
-    setProviderId(null)
-    setApiKey("")
-    setShowKey(false)
-    setError(null)
-    onOpenChange(false)
   }
 
   return (
@@ -175,10 +195,7 @@ export function AddCredentialDialog({
                       >
                         {provider ? (
                           <>
-                            {(() => {
-                              const Icon = provider.icon
-                              return <Icon className="size-4" />
-                            })()}
+                            <ProviderIcon provider={provider} />
                             {provider.name}
                           </>
                         ) : (
@@ -193,23 +210,20 @@ export function AddCredentialDialog({
                       <CommandList>
                         <CommandEmpty>No providers found.</CommandEmpty>
                         <CommandGroup>
-                          {providerList.map((item) => {
-                            const Icon = item.icon
-                            return (
-                              <CommandItem
-                                key={item.id}
-                                value={item.name}
-                                onSelect={() => {
-                                  setProviderId(item.id)
-                                  setProviderOpen(false)
-                                  setError(null)
-                                }}
-                              >
-                                <Icon className="size-4" />
-                                {item.name}
-                              </CommandItem>
-                            )
-                          })}
+                          {providerList.map((item) => (
+                            <CommandItem
+                              key={item.id}
+                              value={item.name}
+                              onSelect={() => {
+                                setProviderId(item.id)
+                                setProviderOpen(false)
+                                setError(null)
+                              }}
+                            >
+                              <ProviderIcon provider={item} />
+                              {item.name}
+                            </CommandItem>
+                          ))}
                         </CommandGroup>
                       </CommandList>
                     </Command>
@@ -248,7 +262,9 @@ export function AddCredentialDialog({
                   )}
                 </Button>
               </div>
-              <FieldDescription>Stored only for this session.</FieldDescription>
+              <FieldDescription>
+                Stored encrypted on your account.
+              </FieldDescription>
             </Field>
           </FieldGroup>
         </form>
@@ -267,8 +283,8 @@ export function AddCredentialDialog({
               </Button>
             }
           />
-          <Button type="submit" form="credential-form">
-            Add credential
+          <Button type="submit" form="credential-form" disabled={saving}>
+            {saving ? "Saving…" : "Add credential"}
           </Button>
         </DialogFooter>
       </DialogContent>

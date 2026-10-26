@@ -1,5 +1,4 @@
 import type { LanguageModel } from "ai"
-import type { LucideIcon } from "lucide-react"
 
 /** A single model offered by a provider. */
 export interface ProviderModel {
@@ -15,8 +14,10 @@ export interface ProviderConfig {
   id: string
   // Display name (e.g. "Google").
   name: string
-  // Icon rendered next to the provider name in the UI.
-  icon: LucideIcon
+  // Path to the provider's brand logo (public asset; e.g.
+  // "/logos/google-gemini-icon.svg") — rendered by
+  // components/provider-icon.tsx wherever it appears in the UI.
+  icon: string
   // The models this provider offers.
   models: ProviderModel[]
   /**

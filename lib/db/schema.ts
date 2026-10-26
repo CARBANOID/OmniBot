@@ -7,6 +7,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core"
 
 export const bots = pgTable(
@@ -33,6 +34,36 @@ export const bots = pgTable(
 
 export type Bot = typeof bots.$inferSelect
 export type NewBot = typeof bots.$inferInsert
+
+export const credentials = pgTable(
+  "credentials",
+  {
+    id: text("id").primaryKey().$default(() => nanoid()),
+    // Third-party id (Clerk user id: user_...).
+    userId: text("user_id").notNull(),
+    // Provider id from the code registry in @/providers ("google", "openai", …).
+    provider: text("provider").notNull(),
+    // Display name the user chose when adding it ("key-1"). Unique per
+    // user (see credentials_user_name_idx) — a name is the credential's
+    // identity in the UI, so it must be unambiguous in the picker.
+    name: text("name").notNull(),
+    // AES-256-GCM ciphertext, base64 (iv ‖ tag ‖ key bytes) — the raw key
+    // never touches the database.
+    apiKey: text("api_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [
+    index("credentials_user_id_idx").on(t.userId),
+    // One credential with a given name per user — the name doubles as the
+    // label shown everywhere in the UI, so it must be distinct.
+    uniqueIndex("credentials_user_name_idx").on(t.userId, t.name),
+  ]
+)
+
+export type Credential = typeof credentials.$inferSelect
+export type NewCredential = typeof credentials.$inferInsert
 
 export const chatKinds = pgEnum("chat_kind", ["direct", "group"])
 

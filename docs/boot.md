@@ -355,3 +355,11 @@ export const credentials = pgTable(
   },
   (t) => [index("credentials_user_id_idx").on(t.userId)]
 )
+
+- lib/validations/credential.ts — createInsertSchema(credentials, { name: z.string().min(1).max(50), provider: z.string().min(1).max(50) }), then .omit({ id: true, userId: true, createdAt: true }) — provider/apiKey get registry + length checks in the action, not the schema.
+- actions/credential.ts — createCredential / deleteCredential, same shape as actions/bot.ts: auth() → parse → registry check (providers[data.provider]) → encrypt → insert/delete scoped to userId → revalidatePath.
+- queries/credentials.ts — getUserCredentials() mirroring getUserChats() (call auth() internally, signed-out → []).
+- Then credential-dialog.tsx's add() and the picker's context switch from client-state useState to the server action + initial props — the context shape in context.tsx can stay identical, so Chat, ModelPicker, etc. don't change at all.
+
+* when the currently selected credential is selected again through the credential search bar , it opens a dialog box to update and delete the credential , just like the chat bot dialog that lets me update and delete. follow the same design pattern  as it was for chat bot updation logic which was at the chat header
+

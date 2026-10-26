@@ -40,14 +40,21 @@ export function ModelPicker({
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger render={<PromptInputButton variant="ghost" size="sm" />}>
-        <span className="max-w-40 truncate text-sm">
+      {/* `group` so the label can brighten on hover (see the span below). */}
+      <PopoverTrigger
+        render={
+          <PromptInputButton variant="ghost" size="sm" className="group" />
+        }
+      >
+        {/* Slightly dim normally, full-foreground on hover — overrides the
+            footer addon's muted-foreground and reads as a subtle brighten. */}
+        <span className="max-w-40 truncate text-sm text-foreground/85 group-hover:text-foreground">
           {model?.name ?? "Model"}
         </span>
       </PopoverTrigger>
       {/* Left edge of the box lines up with the left edge of the button
           (the model name), rather than centering over it. */}
-      <PopoverContent align="start" className="w-64 p-2">
+      <PopoverContent align="start" className="w-60 p-1">
         <Command>
           {/* No search box: ~5 models fit, more scroll into view. */}
           <CommandList className="max-h-44">

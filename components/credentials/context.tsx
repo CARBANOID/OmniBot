@@ -9,21 +9,19 @@ import {
   type ReactNode,
 } from "react"
 
+import type { DeleteCredentialResult } from "@/actions/credential"
+import { deleteCredential } from "@/actions/credential"
+import type { CredentialSummary } from "@/queries/credentials"
 import { providers } from "@/providers"
 import type { ProviderConfig } from "@/providers/types"
 
 /**
- * A saved provider credential. Client state only (placeholder — no DB table
- * yet), shaped so persistence can be layered in later.
+ * A saved provider credential as the client knows it: id, name, and the
+ * provider id. The API key itself is NOT here — it lives encrypted in the DB
+ * and is decrypted server-side by the chat route from the id (see
+ * queries/credentials.ts, app/api/chat/route.ts).
  */
-export interface Credential {
-  id: string
-  // Display name chosen when the credential was added (e.g. "Work Google key").
-  name: string
-  // Provider id from `@/providers` (e.g. "google").
-  provider: string
-  apiKey: string
-}
+export type Credential = CredentialSummary
 
 interface CredentialsContextValue {
   credentials: Credential[]
@@ -32,15 +30,28 @@ interface CredentialsContextValue {
   // models) for the UI. null when nothing is selected.
   credential: Credential | null
   provider: ProviderConfig | null
+  // Append a row the server action just created (it returns the id).
   add: (credential: Credential) => void
-  remove: (id: string) => void
+  // Replace a row in place (after a successful update — e.g. its new name).
+  update: (credential: Credential) => void
+  // Delete via the server action; on success also drops it from local state.
+  // Returns the action result so a future UI can show the inline error.
+  remove: (id: string) => Promise<DeleteCredentialResult>
   select: (id: string) => void
 }
 
 const CredentialsContext = createContext<CredentialsContextValue | null>(null)
 
-export function CredentialsProvider({ children }: { children: ReactNode }) {
-  const [credentials, setCredentials] = useState<Credential[]>([])
+export function CredentialsProvider({
+  initial = [],
+  children,
+}: {
+  // The user's saved credentials, fetched server-side by the page (see
+  // getUserCredentials in queries/credentials.ts) and seeded into the state.
+  initial?: Credential[]
+  children: ReactNode
+}) {
+  const [credentials, setCredentials] = useState<Credential[]>(initial)
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const credential = useMemo(
@@ -56,9 +67,19 @@ export function CredentialsProvider({ children }: { children: ReactNode }) {
     setCredentials((current) => [...current, newCredential])
   }, [])
 
-  const remove = useCallback((id: string) => {
-    setCredentials((current) => current.filter((c) => c.id !== id))
-    setSelectedId((current) => (current === id ? null : current))
+  const update = useCallback((next: Credential) => {
+    setCredentials((current) =>
+      current.map((c) => (c.id === next.id ? next : c))
+    )
+  }, [])
+
+  const remove = useCallback(async (id: string) => {
+    const result = await deleteCredential(id)
+    if (result.ok) {
+      setCredentials((current) => current.filter((c) => c.id !== id))
+      setSelectedId((current) => (current === id ? null : current))
+    }
+    return result
   }, [])
 
   const select = useCallback((id: string) => setSelectedId(id), [])
@@ -70,10 +91,20 @@ export function CredentialsProvider({ children }: { children: ReactNode }) {
       credential,
       provider,
       add,
+      update,
       remove,
       select,
     }),
-    [credentials, selectedId, credential, provider, add, remove, select]
+    [
+      credentials,
+      selectedId,
+      credential,
+      provider,
+      add,
+      update,
+      remove,
+      select,
+    ]
   )
 
   return (

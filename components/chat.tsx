@@ -24,6 +24,7 @@ import {
 } from "@/components/ai-elements/prompt-input"
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { ChatAvatar } from "@/components/chat-avatar"
+import { CredentialEditButton } from "@/components/credentials/credential-edit-button"
 import { CredentialPicker } from "@/components/credentials/credential-picker"
 import {
   CredentialsProvider,
@@ -31,17 +32,21 @@ import {
 } from "@/components/credentials/context"
 import { ModelPicker } from "@/components/credentials/model-picker"
 import type { EditableBot } from "@/lib/validations/bot"
+import type { Credential } from "@/components/credentials/context"
 import { providerList } from "@/providers"
 
 export interface ChatProps {
   // The bot behind this chat, when there is one — its face greets the user in
   // the empty state. null for a bot-less chat.
   bot?: EditableBot | null
+  // The user's saved credentials (fetched server-side by the page) — seeds
+  // the credentials context.
+  credentials?: Credential[]
 }
 
-export function Chat({ bot }: ChatProps) {
+export function Chat({ bot, credentials }: ChatProps) {
   return (
-    <CredentialsProvider>
+    <CredentialsProvider initial={credentials}>
       <ChatConversation bot={bot} />
     </CredentialsProvider>
   )
@@ -77,7 +82,8 @@ function ChatConversation({ bot }: ChatProps) {
         body: {
           provider: credential.provider,
           model: effectiveModelId,
-          apiKey: credential.apiKey,
+          // Only the id travels; the route decrypts the key server-side.
+          credentialId: credential.id,
         },
       }
     )
@@ -139,7 +145,9 @@ function ChatConversation({ bot }: ChatProps) {
           />
           <PromptInputFooter>
             <PromptInputTools>
-              <CredentialPicker />
+              {/* The selected credential, when there is one: its label, and
+                  it opens the update/delete editor. null until selected. */}
+              <CredentialEditButton />
               {/* Hidden entirely until a credential (provider) is selected. */}
               {provider && (
                 <ModelPicker
@@ -149,13 +157,18 @@ function ChatConversation({ bot }: ChatProps) {
                 />
               )}
             </PromptInputTools>
-            {/* While generating this is the Stop button (onStop). Idle it is
-                disabled until there is a credential and some text. */}
-            <PromptInputSubmit
-              disabled={!isGenerating && (!credential || !text.trim())}
-              status={status}
-              onStop={stop}
-            />
+            <div className="flex items-center gap-1">
+              {/* Always the key icon — opens the credential search bar,
+                  sitting just left of the enter button. */}
+              <CredentialPicker />
+              {/* While generating this is the Stop button (onStop). Idle it
+                  is disabled until there is a credential and some text. */}
+              <PromptInputSubmit
+                disabled={!isGenerating && (!credential || !text.trim())}
+                status={status}
+                onStop={stop}
+              />
+            </div>
           </PromptInputFooter>
         </PromptInput>
       </div>
