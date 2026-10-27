@@ -1,8 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
 
 // AES-256-GCM for stored API keys. Server-only: both call sites are server
-// (actions/credential.ts writes, app/api/chat/route.ts reads), so the plain
-// key never enters the client bundle.
+// (actions/credential.ts writes, trigger/chat.ts reads), so the plain key
+// never enters the client bundle.
 //
 // The key lives in CREDENTIAL_ENC_KEY — a 32-byte secret, written as 64 hex
 // chars (generate one with `openssl rand -hex 32` into .env.local).

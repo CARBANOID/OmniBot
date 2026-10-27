@@ -46,9 +46,11 @@ export function ModelPicker({
           <PromptInputButton variant="ghost" size="sm" className="group" />
         }
       >
-        {/* Slightly dim normally, full-foreground on hover — overrides the
-            footer addon's muted-foreground and reads as a subtle brighten. */}
-        <span className="max-w-40 truncate text-sm text-foreground/85 group-hover:text-foreground">
+        {/* Slightly dim normally, full-foreground on hover and while typing
+            (the PromptInput's InputGroup is the named `group/input-group`)
+            — overrides the footer addon's muted-foreground and reads as a
+            subtle brighten. */}
+        <span className="max-w-40 truncate text-sm text-foreground/85 group-hover:text-foreground group-focus-within/input-group:text-foreground">
           {model?.name ?? "Model"}
         </span>
       </PopoverTrigger>

@@ -4,6 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -11,6 +12,10 @@ import {
 
 import type { DeleteCredentialResult } from "@/actions/credential"
 import { deleteCredential } from "@/actions/credential"
+import {
+  CREDENTIAL_COOKIE_MAX_AGE,
+  CREDENTIAL_COOKIE_NAME,
+} from "@/lib/credential-cookie"
 import type { CredentialSummary } from "@/queries/credentials"
 import { providers } from "@/providers"
 import type { ProviderConfig } from "@/providers/types"
@@ -18,8 +23,8 @@ import type { ProviderConfig } from "@/providers/types"
 /**
  * A saved provider credential as the client knows it: id, name, and the
  * provider id. The API key itself is NOT here — it lives encrypted in the DB
- * and is decrypted server-side by the chat route from the id (see
- * queries/credentials.ts, app/api/chat/route.ts).
+ * and is decrypted server-side by the chat agent from the id (see
+ * trigger/chat.ts).
  */
 export type Credential = CredentialSummary
 
@@ -44,15 +49,22 @@ const CredentialsContext = createContext<CredentialsContextValue | null>(null)
 
 export function CredentialsProvider({
   initial = [],
+  initialSelectedId = null,
   children,
 }: {
   // The user's saved credentials, fetched server-side by the page (see
   // getUserCredentials in queries/credentials.ts) and seeded into the state.
   initial?: Credential[]
+  // The credential to restore, read from the selection cookie by the page
+  // and validated against the user's own rows — so a refresh paints the
+  // selection from the first frame (same first-paint trick as the sidebar).
+  initialSelectedId?: string | null
   children: ReactNode
 }) {
   const [credentials, setCredentials] = useState<Credential[]>(initial)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(
+    initialSelectedId
+  )
 
   const credential = useMemo(
     () => credentials.find((c) => c.id === selectedId) ?? null,
@@ -62,6 +74,16 @@ export function CredentialsProvider({
     () => (credential ? (providers[credential.provider] ?? null) : null),
     [credential]
   )
+
+  // Keep the selection cookie in lockstep with the state — every change,
+  // pick or clear, lands in the cookie (path=/, so it is site-global), and
+  // an empty value (max-age=0) removes it when the selection is cleared.
+  // The id is opaque: the key itself never leaves the server.
+  useEffect(() => {
+    document.cookie = `${CREDENTIAL_COOKIE_NAME}=${
+      selectedId ?? ""
+    }; path=/; max-age=${selectedId ? CREDENTIAL_COOKIE_MAX_AGE : 0}`
+  }, [selectedId])
 
   const add = useCallback((newCredential: Credential) => {
     setCredentials((current) => [...current, newCredential])

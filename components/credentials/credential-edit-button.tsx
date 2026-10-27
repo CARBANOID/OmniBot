@@ -44,10 +44,17 @@ export function CredentialEditButton() {
           setOpen(true)
         }}
       >
-        <ProviderIcon provider={provider} />
-        {/* Slightly dim normally, full-foreground on hover — overrides the
-            footer addon's muted-foreground and reads as a subtle brighten. */}
-        <span className="max-w-48 truncate text-sm text-foreground/85 group-hover:text-foreground">
+        {/* Slightly dim at rest, full on hover AND while the prompt box has
+            focus (typing) — the focus state comes from the PromptInput's
+            InputGroup, which is the named `group/input-group`. */}
+        <ProviderIcon
+          provider={provider}
+          className="opacity-85 group-hover:opacity-100 group-focus-within/input-group:opacity-100"
+        />
+        {/* Slightly dim normally, full-foreground on hover and while typing —
+            overrides the footer addon's muted-foreground and reads as a
+            subtle brighten. */}
+        <span className="max-w-48 truncate text-sm text-foreground/85 group-hover:text-foreground group-focus-within/input-group:text-foreground">
           {provider.name} ({keyName})
         </span>
       </PromptInputButton>

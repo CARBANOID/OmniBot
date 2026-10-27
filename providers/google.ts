@@ -9,6 +9,9 @@ export const google: ProviderConfig = {
   models: [
     { id: "gemini-4-argon", name: "Gemini 4 Argon" },
     { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+    { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash" },
+    { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash" },
+    { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash" },
     { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
   ],
   createProvider: (apiKey) => createGoogle({ apiKey }),

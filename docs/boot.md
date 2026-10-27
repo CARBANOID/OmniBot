@@ -363,3 +363,24 @@ export const credentials = pgTable(
 
 * when the currently selected credential is selected again through the credential search bar , it opens a dialog box to update and delete the credential , just like the chat bot dialog that lets me update and delete. follow the same design pattern  as it was for chat bot updation logic which was at the chat header
 
+# Durable Chat
+
+## Trigger.dev (https://trigger.dev/)
+
+ when a model is executing or replying and if user refreshes the page or redeploys or his network crashes , the next js server breaks the connection  due to which the task is not executed , trigger provides a seperate sandbox where model run the task , call tools and save data and then return the result 
+
+![](Trigger.jpeg)
+
+```
+npx trigger.dev@latest init
+``` 
+
+ To start trigger server
+```
+npx trigger.dev@latest dev
+```
+
+
+* Migrate the Vercel AI SDK chat (app/api/chat/route.ts + components/chat.tsx) to a Trigger.dev chat agent with transcript persistence scoped to chats.id — platform-default storage, no new tables/features/tools. 
+* Rules: owner + credentials resolved server-side in the run (no Clerk in workers), selection rides typed clientData and is re-validated there, actions throw user-safe strings. 
+* Session contract: closed = ended forever, 409 → "start a new chat" banner, history keeps rendering. Dev loop is next dev + trigger.dev@<sdk-ver> dev; "Stream stalled" = no worker. Done = send/stop/refresh/follow-up verified via run trace, not just tsc.
