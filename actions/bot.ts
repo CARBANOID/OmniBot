@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache"
 
 import { db } from "@/lib/db"
 import { bots, chatMembers, chats } from "@/lib/db/schema"
+import { createSandbox, deleteSandbox } from "@/lib/daytona"
 import {
   createBotInputSchema,
   updateBotInputSchema,
@@ -29,6 +30,21 @@ export async function createBot(input: unknown): Promise<BotActionResult> {
     return { ok: false, error: "Check the form and try again." }
   }
 
+  // Every bot gets its own sandbox. We create it before touching the
+  // database: if it fails, nothing is persisted (no bot row points at a dead
+  // sandbox); if the write below fails, we still have the id to clean it up
+  // (no orphan sandbox). The id is server-owned, exactly like userId.
+  let sandboxId: string
+  try {
+    sandboxId = await createSandbox()
+  } catch (error) {
+    console.error("[createBot] Failed to create the bot's sandbox:", error)
+    return {
+      ok: false,
+      error: "Could not set up your bot. Please try again.",
+    }
+  }
+
   try {
     // One atomic step: the bot, its direct chat, and the chat membership
     // all land or none of them do.
@@ -42,6 +58,8 @@ export async function createBot(input: unknown): Promise<BotActionResult> {
           avatar: data.avatar,
           // Server-owned: stamped from the session, never taken from the form.
           userId,
+          // Third-party id of this bot's sandbox (see lib/daytona.ts).
+          sandboxId,
         })
         .returning({ id: bots.id })
 
@@ -64,6 +82,17 @@ export async function createBot(input: unknown): Promise<BotActionResult> {
     revalidatePath("/", "page")
     return { ok: true }
   } catch (error) {
+    // The bot insert failed but its sandbox exists — destroy it so we don't
+    // leak a machine, then report the failure.
+    try {
+      await deleteSandbox(sandboxId)
+    } catch (cleanupError) {
+      console.error(
+        `[createBot] Bot insert failed and the orphan sandbox ${sandboxId} ` +
+          "could not be removed either:",
+        cleanupError
+      )
+    }
     console.error(
       "[createBot] Failed to create bot + chat + membership:",
       error
@@ -128,17 +157,20 @@ export async function deleteBot(botId: string): Promise<BotActionResult> {
 
   try {
     let deleted = false
+    let sandboxId: string | null = null
     await db.transaction(async (tx) => {
       // Ownership-guarded delete: scoped to the current user, so a bot owned
       // by someone else is not found. The FK cascade drops this bot's chat
-      // memberships in the same step.
+      // memberships in the same step. We capture the bot's sandbox id as we go
+      // so we can take the sandbox down once the row is gone.
       const [removed] = await tx
         .delete(bots)
         .where(and(eq(bots.id, botId), eq(bots.userId, userId)))
-        .returning({ id: bots.id })
+        .returning({ id: bots.id, sandboxId: bots.sandboxId })
       if (!removed) return
 
       deleted = true
+      sandboxId = removed.sandboxId
 
       // A direct chat whose only member was this bot is now empty and
       // purposeless — drop it so it doesn't linger as a faceless chat.
@@ -155,6 +187,22 @@ export async function deleteBot(botId: string): Promise<BotActionResult> {
 
     if (!deleted) {
       return { ok: false, error: "That bot no longer exists." }
+    }
+
+    // The bot and its chat are gone; now take the sandbox down. The row
+    // deletion is already committed, so a cleanup failure is logged (to be
+    // reaped) rather than failing the whole action — re-running it would no
+    // longer find the bot row to delete.
+    if (sandboxId) {
+      try {
+        await deleteSandbox(sandboxId)
+      } catch (error) {
+        console.error(
+          `[deleteBot] Bot ${botId} was deleted but its sandbox ${sandboxId} ` +
+            "could not be removed:",
+          error
+        )
+      }
     }
 
     revalidatePath("/", "page")

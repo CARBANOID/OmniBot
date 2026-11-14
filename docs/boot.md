@@ -384,3 +384,36 @@ npx trigger.dev@latest dev
 * Migrate the Vercel AI SDK chat (app/api/chat/route.ts + components/chat.tsx) to a Trigger.dev chat agent with transcript persistence scoped to chats.id — platform-default storage, no new tables/features/tools. 
 * Rules: owner + credentials resolved server-side in the run (no Clerk in workers), selection rides typed clientData and is re-validated there, actions throw user-safe strings. 
 * Session contract: closed = ended forever, 409 → "start a new chat" banner, history keeps rendering. Dev loop is next dev + trigger.dev@<sdk-ver> dev; "Stream stalled" = no worker. Done = send/stop/refresh/follow-up verified via run trace, not just tsc.
+
+## Daytona (to add sandboxes to the agent)
+
+```
+npm install @daytona/sdk
+```
+
+```
+npx skills@latest add daytona/skills
+```
+
+* Use daytona skill to create a sandbox for each bot that gets created.
+Use or add a sandboxId property to schema to maintain the relationship between the two.
+For now, do not invoke the sandbox, start it, perform anything on it - we just want to create the sandbox on bot creation, and delete it on bot deletion.
+
+* Use ai sdk and trigger skills to give our chat agent base instructions about it's name, job, purpose, and the sandbox environment it is in.
+Do not mention any use or tools yet, as we do not have any.
+
+* Give our chat agent tools so it can perform computer use, you are at liberty to add more or less but here is the general idea:
+    * bash (run command)
+    * read file
+    * write file
+    * list files
+    * mouse click
+    * mouse move
+    * mouse scroll
+    * keyboard type
+    * keyboard press
+    * view screen (used when agent needs to look what's on the screen - never rendered in chat)
+    * show screen (used when user asks the agent what's on the screen - rendered in chat)
+---
+Compose the ui in `@components/chat.tsx` to render tool calls.
+Use ai sdk, trigger, daytona, shadcn and ai-elements skills.

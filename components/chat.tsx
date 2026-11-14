@@ -33,6 +33,7 @@ import {
 } from "@/components/ai-elements/prompt-input"
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { ChatAvatar } from "@/components/chat-avatar"
+import { ChatToolPart } from "@/components/chat-tools"
 import { CredentialEditButton } from "@/components/credentials/credential-edit-button"
 import { CredentialPicker } from "@/components/credentials/credential-picker"
 import {
@@ -157,7 +158,8 @@ function ChatGate({
     return (
       <div className="flex flex-1 items-center justify-center p-4">
         <p className="text-xs text-muted-foreground">
-          Couldn't load this chat's messages. Refresh the page to try again.
+          Couldn&apos;t load this chat&apos;s messages. Refresh the page to try
+          again.
         </p>
       </div>
     )
@@ -193,7 +195,13 @@ function ChatConversation({
   // `resume` reconnects to an in-flight stream after a mid-answer refresh
   // (the transport replays from the loaded transcript's cursor); with an
   // empty transcript there is nothing to reconnect to yet.
-  const { messages, status, error, stop: aiStop, sendMessage } = useChat({
+  const {
+    messages,
+    status,
+    error,
+    stop: aiStop,
+    sendMessage,
+  } = useChat({
     id: chatId,
     transport,
     messages: initialMessages,
@@ -247,6 +255,8 @@ function ChatConversation({
                       <MessageResponse key={`${message.id}-${i}`}>
                         {part.text}
                       </MessageResponse>
+                    ) : part.type.startsWith("tool-") ? (
+                      <ChatToolPart key={`${message.id}-${i}`} part={part} />
                     ) : null
                   )}
                 </MessageContent>

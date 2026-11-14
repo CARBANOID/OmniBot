@@ -13,12 +13,14 @@ export const botInsertSchema = createInsertSchema(bots, {
 })
 
 // What a client may submit. Server-owned columns are omitted: `id` and
-// `createdAt` get defaults, and `userId` is stamped server-side from the
-// Clerk session (see actions/bot.ts) — it never travels with the form.
+// `createdAt` get defaults, `userId` is stamped server-side from the Clerk
+// session (see actions/bot.ts), and `sandboxId` is stamped from the bot's
+// sandbox (see lib/daytona.ts) — none of it travels with the form.
 export const createBotInputSchema = botInsertSchema.omit({
   id: true,
   userId: true,
   createdAt: true,
+  sandboxId: true,
 })
 
 export type BotInput = z.infer<typeof createBotInputSchema>
@@ -42,6 +44,7 @@ export const updateBotInputSchema = botInsertSchema.omit({
   id: true,
   userId: true,
   createdAt: true,
+  sandboxId: true,
 })
 
 export type UpdateBotInput = z.infer<typeof updateBotInputSchema>
