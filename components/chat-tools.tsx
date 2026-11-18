@@ -12,13 +12,16 @@ import {
   MonitorIcon,
   MouseIcon,
   MousePointerClickIcon,
+  PlusIcon,
   MousePointerIcon,
   TerminalIcon,
   WrenchIcon,
   XIcon,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
+import { useState } from "react"
 
+import { Button } from "@/components/ui/button"
 import {
   Collapsible,
   CollapsibleContent,
@@ -425,4 +428,59 @@ export function ChatToolPart({
     return <ScreenPart className={className} part={part} />
   }
   return <ToolRow className={className} part={part} toolName={toolName} />
+}
+
+/**
+ * The model's private thinking (a `reasoning` part), hidden by default.
+ * The plus icon is the disclosure — click it and the raw chain of thought
+ * appears below; open or closed, the row stays one compact line.
+ *
+ * While the part is still streaming (the model is thinking right now) the
+ * label reads "Thinking…" with a spinner, so a long pre-answer pause shows
+ * as visible work instead of a frozen page. Once answered, the same row
+ * ("Thinking") documents that the turn did think — and lets the user read
+ * how.
+ */
+export function ChatReasoningPart({
+  text,
+  streaming,
+  className,
+}: {
+  text: string
+  streaming?: boolean
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <Collapsible
+      className={cn("mt-1", className)}
+      open={open}
+      onOpenChange={setOpen}
+    >
+      <CollapsibleTrigger
+        render={
+          <Button
+            className="h-7 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground"
+            size="sm"
+            variant="ghost"
+          />
+        }
+      >
+        <PlusIcon
+          className={cn(
+            "size-3.5 shrink-0 transition-transform duration-200",
+            open && "rotate-45"
+          )}
+        />
+        {streaming ? "Thinking…" : "Thinking"}
+        {streaming && <Spinner className="size-3" />}
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="max-h-80 space-y-0 overflow-y-auto rounded-md border border-border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
+          {text || "…"}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  )
 }

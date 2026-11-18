@@ -19,14 +19,31 @@ function isBusyError(error: unknown): boolean {
   const busyStatuses = new Set([429, 500, 502, 503, 529])
   const busyMessage =
     /high demand|rate limit|resource exhausted|too many requests|unavailable|overloaded|timed ?out|timeout/i
-  let current = error as (Error & { statusCode?: number; cause?: unknown }) | null
+  let current = error as
+    (Error & { statusCode?: number; cause?: unknown }) | null
   for (let depth = 0; current && depth < 6; depth++) {
     const name = typeof current.name === "string" ? current.name : ""
     const message = typeof current.message === "string" ? current.message : ""
     const statusCode =
       typeof current.statusCode === "number" ? current.statusCode : undefined
-    if (name === "TimeoutError" || busyStatuses.has(statusCode ?? -1)) return true
+    if (name === "TimeoutError" || busyStatuses.has(statusCode ?? -1))
+      return true
     if (busyMessage.test(message)) return true
+    current = current.cause as typeof current
+  }
+  return false
+}
+
+// Ollama rejects a request whose context is so large it had to truncate
+// the front of the prompt: the qwen renderer then finds no plain user
+// turn left and returns 500 "no user query found in messages". It is not
+// transient — retrying never helps. Tell the user in words they can act
+// on (new chat), not with a "model is busy" line that invites a retry.
+function isContextOverflowError(error: unknown): boolean {
+  let current = error as (Error & { cause?: unknown }) | null
+  for (let depth = 0; current && depth < 6; depth++) {
+    const message = typeof current.message === "string" ? current.message : ""
+    if (/no user query found in messages/i.test(message)) return true
     current = current.cause as typeof current
   }
   return false
@@ -45,7 +62,10 @@ export const omnibotChat = chat.agent({
   clientDataSchema: z.object({
     provider: z.string(),
     model: z.string(),
-    credentialId: z.string(),
+    // Present only for keyless providers (Ollama / local). Keyed providers
+    // always send their credential id; a keyless one has no saved credential,
+    // so this is optional and must be absent for it.
+    credentialId: z.string().optional(),
   }),
   // The bot's computer-use tools (shell, files, mouse, keyboard, screen),
   // rebuilt for each turn's chat id. Declaring them on the agent — not just
@@ -58,6 +78,12 @@ export const omnibotChat = chat.agent({
   uiMessageStreamOptions: {
     onError: (error) => {
       console.error("[omnibot-chat] Stream error:", error)
+      // Context overflow arrives as a deterministic 500 (see
+      // isContextOverflowError), and isBusyError would swallow it as a
+      // "busy" — check it first so the message says start a new chat.
+      if (isContextOverflowError(error)) {
+        return "This conversation is too long for the local model's context. Start a new chat and ask again."
+      }
       // Busy / overloaded is the common one (Google answers with 503
       // "high demand", and a stalled connection trips the per-request
       // timeouts below). Say so plainly and point at the retry, instead of a
@@ -118,27 +144,39 @@ export const omnibotChat = chat.agent({
       throw new Error("No bot is set up for this chat.")
     }
 
-    const [row] = await db
-      .select({ apiKey: credentials.apiKey })
-      .from(credentials)
-      .where(
-        and(
-          eq(credentials.id, credentialId),
-          eq(credentials.userId, chatRow.userId),
-          eq(credentials.provider, providerId)
-        )
-      )
-    if (!row) {
-      throw new Error("Unknown credential.")
-    }
+    // A keyless (local) provider — Ollama — needs no saved credential, so the
+    // owner-scoped lookup + decrypt below only runs for keyed ones. For a
+    // keyless one `key` stays undefined and createProvider() omits the
+    // Authorization header (Ollama ignores it).
+    let key: string | undefined
+    if (provider.requiresApiKey !== false) {
+      if (!credentialId) {
+        throw new Error("Choose a credential to start chatting.")
+      }
 
-    let key: string
-    try {
-      key = decryptCredential(row.apiKey)
-    } catch (error) {
-      // A corrupt or re-keyed row: log the real error, surface nothing.
-      console.error("[omnibot-chat] Failed to decrypt credential:", error)
-      throw new Error("Unknown credential.")
+      // Who owns this chat — the credential must belong to THEM, and to the
+      // requested provider, exactly like the old getCredentialKey query.
+      const [row] = await db
+        .select({ apiKey: credentials.apiKey })
+        .from(credentials)
+        .where(
+          and(
+            eq(credentials.id, credentialId),
+            eq(credentials.userId, chatRow.userId),
+            eq(credentials.provider, providerId)
+          )
+        )
+      if (!row) {
+        throw new Error("Unknown credential.")
+      }
+
+      try {
+        key = decryptCredential(row.apiKey)
+      } catch (error) {
+        // A corrupt or re-keyed row: log the real error, surface nothing.
+        console.error("[omnibot-chat] Failed to decrypt credential:", error)
+        throw new Error("Unknown credential.")
+      }
     }
 
     // `streamText`, `signal`, `tools`, and the already-converted `messages`
@@ -200,6 +238,23 @@ export const omnibotChat = chat.agent({
       // A few attempts over a transient "high demand" 503 before we give up.
       // Each 503 is fast; the timeouts above cap how long the set can run.
       maxRetries: 3,
+      // Provider-specific body fields. The `openaiCompatible` key is read
+      // only by the one provider in the registry that uses
+      // `@ai-sdk/openai-compatible` (Ollama) — Google/OpenAI/Anthropic/xAI
+      // each go through their own SDKs and never see this — so scoping a
+      // local-only knob here is safe, and it flows into the /v1 body as a
+      // top-level field (non-schema providerOptions values pass through;
+      // verified in the SDK's transformRequestBody).
+      //
+      // `keep_alive`: Ollama evicts an idle model after ~5 min by default;
+      // re-seating a 17 GB Q4_K_M into the GPU before the first token reads
+      // as a hang between turns. Every completion slides this window, so the
+      // model stays warm while a conversation is active and frees VRAM long
+      // after it goes quiet. (Verified against this Ollama build: a
+      // completion with "keep_alive":"3h" extended `ollama ps` to 3h.)
+      providerOptions: {
+        openaiCompatible: { keep_alive: "1h" },
+      },
     })
   },
 })
