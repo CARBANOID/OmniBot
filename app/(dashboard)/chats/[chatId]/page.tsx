@@ -6,11 +6,12 @@ import { Chat } from "@/components/chat"
 import { ChatHeader } from "@/components/chat-header"
 import {
   CREDENTIAL_COOKIE_NAME,
+  LOCAL_PROVIDER_COOKIE_NAME,
   MODEL_COOKIE_NAME,
 } from "@/lib/credential-cookie"
 import { getChat } from "@/queries/chat"
 import { getUserCredentials } from "@/queries/credentials"
-import { providerList } from "@/providers"
+import { providerList, providers } from "@/providers"
 
 export default async function ChatPage({
   params,
@@ -35,9 +36,23 @@ export default async function ChatPage({
   // when it names one of THIS user's own credentials — anything else is
   // dropped, and the context starts unselected.
   const cookieStore = await cookies()
+
+  // The last active provider: EITHER a keyless (local) one — named by its own
+  // cookie and trusted only when it's a keyless provider in the registry —
+  // OR a saved credential, named by its cookie and trusted only when it
+  // belongs to this user. The two cookies are mutually exclusive in the
+  // context (picking one clears the other), so a keyless pick is the more
+  // deliberate, more recent one and takes precedence.
+  const savedLocal = cookieStore.get(LOCAL_PROVIDER_COOKIE_NAME)?.value
+  const keylessCookieValid =
+    savedLocal != null && providers[savedLocal]?.requiresApiKey === false
+
   const saved = cookieStore.get(CREDENTIAL_COOKIE_NAME)?.value
   const initialSelectedId =
-    saved && credentialSeeds.some((c) => c.id === saved) ? saved : null
+    !keylessCookieValid && saved && credentialSeeds.some((c) => c.id === saved)
+      ? saved
+      : null
+  const initialActiveProviderId = keylessCookieValid ? savedLocal : null
 
   // Last selected model, from its global cookie (the gate writes it on every
   // model pick). The cookie is user-settable, so trust it only when it names
@@ -62,6 +77,7 @@ export default async function ChatPage({
         bot={chat.bot}
         credentials={credentialSeeds}
         initialSelectedId={initialSelectedId}
+        initialActiveProviderId={initialActiveProviderId}
         initialModelId={initialModelId}
       />
     </div>

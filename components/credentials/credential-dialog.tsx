@@ -31,6 +31,12 @@ import {
 } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import { providerList } from "@/providers"
+
+// Keyless (local) providers like Ollama need no saved key, so they are not
+// offered here — adding a credential for them would be a pointless row.
+export const keyedProviders = providerList.filter(
+  (p) => p.requiresApiKey !== false
+)
 import {
   Command,
   CommandEmpty,
@@ -210,7 +216,7 @@ export function AddCredentialDialog({
                       <CommandList>
                         <CommandEmpty>No providers found.</CommandEmpty>
                         <CommandGroup>
-                          {providerList.map((item) => (
+                          {keyedProviders.map((item) => (
                             <CommandItem
                               key={item.id}
                               value={item.name}

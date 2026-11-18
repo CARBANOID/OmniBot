@@ -9,6 +9,7 @@ import type {
   ReactNode,
 } from "react";
 
+import type { BaseUIEvent } from "@base-ui/react/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -237,7 +238,7 @@ export const QuestionOption = ({
   const isSelected = question.selectedValues.includes(value);
   const role = question.selectionMode === "single" ? "radio" : "checkbox";
   const handleClick = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) => {
+    (event: BaseUIEvent<MouseEvent<HTMLButtonElement>>) => {
       question.toggleValue(value);
       onClick?.(event);
     },

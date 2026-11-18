@@ -9,7 +9,7 @@ import { useCredentials } from "./context"
 import { PromptInputButton } from "@/components/ai-elements/prompt-input"
 import { ProviderIcon } from "@/components/provider-icon"
 import { contentColumnCenter } from "@/lib/content-center"
-import { providers } from "@/providers"
+import { providerList, providers } from "@/providers"
 import {
   Command,
   CommandEmpty,
@@ -26,6 +26,10 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 
+// Keyless (local) providers — no saved credential needed, so the user picks
+// one here instead of adding a key. Computed once: the registry is static.
+const localProviders = providerList.filter((p) => p.requiresApiKey === false)
+
 /**
  * Footer button that picks the active provider credential. Opens a dialog
  * styled exactly like the sidebar's bot search bar (CommandDialog: top-1/3,
@@ -34,7 +38,14 @@ import {
  * dialog.
  */
 export function CredentialPicker() {
-  const { credentials, credential, selectedId, select } = useCredentials()
+  const {
+    credentials,
+    credential,
+    selectedId,
+    activeProviderId,
+    select,
+    selectKeyless,
+  } = useCredentials()
 
   const [open, setOpen] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
@@ -50,6 +61,9 @@ export function CredentialPicker() {
   // the dialog has fully closed (onOpenChangeComplete), so the footer's
   // selection change doesn't land while the dialog is still animating out.
   const [pendingId, setPendingId] = useState<string | null>(null)
+  // The keyless-provider pick (e.g. Ollama), committed on close like `pendingId`
+  // so the footer's model change doesn't land while the dialog animates out.
+  const [pendingLocalId, setPendingLocalId] = useState<string | null>(null)
   // True when the user re-picked the ACTIVE credential: that opens the
   // editor (update/delete, like the bot editor in the chat header) instead
   // of a re-select.
@@ -66,10 +80,18 @@ export function CredentialPicker() {
         open={open}
         onOpenChange={setOpen}
         onOpenChangeComplete={(nowOpen) => {
-          // Commit the pick only after the closing animation is done.
-          if (nowOpen || pendingId == null) return
-          select(pendingId)
-          setPendingId(null)
+          // Commit the pick only after the closing animation is done. A
+          // credential pick and a keyless-provider pick are mutually
+          // exclusive, so at most one of these is set.
+          if (nowOpen) return
+          if (pendingId != null) {
+            select(pendingId)
+            setPendingId(null)
+          }
+          if (pendingLocalId != null) {
+            selectKeyless(pendingLocalId)
+            setPendingLocalId(null)
+          }
         }}
       >
         <DialogTrigger
@@ -106,51 +128,88 @@ export function CredentialPicker() {
             <CommandList>
               <CommandEmpty>No credentials found.</CommandEmpty>
               <CommandGroup>
-                {[...credentials].sort((a, b) => {
-                  // The active credential always leads the list.
-                  if (a.id === selectedId) return -1
-                  if (b.id === selectedId) return 1
-                  return 0
-                }).map((item) => {
-                  const itemProvider = providers[item.provider]
-                  // name left, provider pinned rightmost; hide the
-                  // CommandItem's injected (unused) check icon, whose own
-                  // ml-auto would otherwise split the space and prevent the
-                  // provider from reaching the edge
-                  return (
+                {[...credentials]
+                  .sort((a, b) => {
+                    // The active credential always leads the list.
+                    if (a.id === selectedId) return -1
+                    if (b.id === selectedId) return 1
+                    return 0
+                  })
+                  .map((item) => {
+                    const itemProvider = providers[item.provider]
+                    // name left, provider pinned rightmost; hide the
+                    // CommandItem's injected (unused) check icon, whose own
+                    // ml-auto would otherwise split the space and prevent the
+                    // provider from reaching the edge
+                    return (
+                      <CommandItem
+                        key={item.id}
+                        value={`${item.name} ${itemProvider?.name ?? ""}`}
+                        onSelect={() => {
+                          if (item.id === selectedId) {
+                            // Re-picking the active credential opens its
+                            // editor; a fresh pick queues a selection.
+                            setOpen(false)
+                            setEditOpen(true)
+                            return
+                          }
+                          // Queue the pick; the commit happens in
+                          // onOpenChangeComplete, once the dialog is closed.
+                          setPendingId(item.id)
+                          setOpen(false)
+                        }}
+                        className="justify-between [&>svg:last-child]:hidden"
+                      >
+                        {/* Keep icon + name together on the left; the name
+                          truncates so the provider keeps its slot. */}
+                        <span className="flex min-w-0 items-center gap-2">
+                          {itemProvider ? (
+                            <ProviderIcon provider={itemProvider} />
+                          ) : null}
+                          <span className="truncate">{item.name}</span>
+                        </span>
+                        {itemProvider && (
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {itemProvider.name}
+                          </span>
+                        )}
+                      </CommandItem>
+                    )
+                  })}
+              </CommandGroup>
+              {/* Keyless (local) providers: no credential to add — picking one
+                  activates it directly. Rendered only when any exist. */}
+              {localProviders.length > 0 && (
+                <CommandGroup heading="Local providers">
+                  {localProviders.map((item) => (
                     <CommandItem
                       key={item.id}
-                      value={`${item.name} ${itemProvider?.name ?? ""}`}
+                      value={item.name}
                       onSelect={() => {
-                        if (item.id === selectedId) {
-                          // Re-picking the active credential opens its
-                          // editor; a fresh pick queues a selection.
+                        if (item.id === activeProviderId) {
+                          // Already the active local provider — nothing to
+                          // change (and nothing to edit); just close.
                           setOpen(false)
-                          setEditOpen(true)
                           return
                         }
-                        // Queue the pick; the commit happens in
-                        // onOpenChangeComplete, once the dialog is closed.
-                        setPendingId(item.id)
+                        setPendingLocalId(item.id)
                         setOpen(false)
                       }}
                       className="justify-between [&>svg:last-child]:hidden"
                     >
-                      {/* Keep icon + name together on the left; the name
-                          truncates so the provider keeps its slot. */}
                       <span className="flex min-w-0 items-center gap-2">
-                        {itemProvider ? <ProviderIcon provider={itemProvider} /> : null}
+                        <ProviderIcon provider={item} />
                         <span className="truncate">{item.name}</span>
                       </span>
-                      {itemProvider && (
+                      {activeProviderId === item.id && (
                         <span className="shrink-0 text-xs text-muted-foreground">
-                          {itemProvider.name}
+                          Active
                         </span>
                       )}
                     </CommandItem>
-                  )
-                })}
-              </CommandGroup>
+                  ))}
+                </CommandGroup>
+              )}
             </CommandList>
             {/* Pinned OUTSIDE the filtered list (but inside the command box,
                 so it always renders and the box's rounded corners clip it). */}

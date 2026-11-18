@@ -9,3 +9,6 @@ export const CREDENTIAL_COOKIE_NAME = "selected_credential"
 export const CREDENTIAL_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 export const MODEL_COOKIE_NAME = "selected_model"
 export const MODEL_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
+// The active keyless provider picked without a credential (e.g. local Ollama).
+export const LOCAL_PROVIDER_COOKIE_NAME = "selected_local_provider"
+export const LOCAL_PROVIDER_COOKIE_MAX_AGE = 60 * 60 * 24 * 7

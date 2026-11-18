@@ -6,7 +6,7 @@ import {
   useTriggerChatTransport,
 } from "@trigger.dev/sdk/chat/react"
 import type { UIMessage } from "ai"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 
 import {
   loadChatTranscript,
@@ -33,7 +33,7 @@ import {
 } from "@/components/ai-elements/prompt-input"
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { ChatAvatar } from "@/components/chat-avatar"
-import { ChatToolPart } from "@/components/chat-tools"
+import { ChatReasoningPart, ChatToolPart } from "@/components/chat-tools"
 import { CredentialEditButton } from "@/components/credentials/credential-edit-button"
 import { CredentialPicker } from "@/components/credentials/credential-picker"
 import {
@@ -64,6 +64,9 @@ export interface ChatProps {
   // The credential to restore after a refresh — the page reads it from the
   // selection cookie and passes it only when it belongs to this user.
   initialSelectedId?: string | null
+  // The keyless (local) provider to restore after a refresh — the page reads
+  // it from its cookie and passes it only when it names a keyless provider.
+  initialActiveProviderId?: string | null
   // The model to restore after a refresh — the page reads it from its
   // selection cookie and passes it only when it names a real registry model.
   initialModelId?: string | null
@@ -74,12 +77,14 @@ export function Chat({
   bot,
   credentials,
   initialSelectedId,
+  initialActiveProviderId,
   initialModelId,
 }: ChatProps) {
   return (
     <CredentialsProvider
       initial={credentials}
       initialSelectedId={initialSelectedId}
+      initialActiveProviderId={initialActiveProviderId}
     >
       <ChatGate chatId={chatId} bot={bot} initialModelId={initialModelId} />
     </CredentialsProvider>
@@ -123,12 +128,13 @@ function ChatGate({
 
   // The provider/model/credential selection rides with every turn as
   // clientData (live-updated as the picker changes) — only ids travel the
-  // wire; the key is resolved + decrypted server-side by the agent.
-  const clientData = credential
+  // wire; the key is resolved + decrypted server-side by the agent. For a
+  // keyless (local) provider there is no credential id to send.
+  const clientData = provider
     ? {
-        provider: credential.provider,
+        provider: provider.id,
         model: effectiveModelId,
-        credentialId: credential.id,
+        ...(credential ? { credentialId: credential.id } : {}),
       }
     : undefined
 
@@ -208,8 +214,33 @@ function ChatConversation({
     resume: initialMessages.length > 0,
   })
 
-  const { credential, provider } = useCredentials()
+  // `useChat`'s `messages` array can momentarily contain the same logical
+  // message twice — same `id` — while a continuation is streaming (the
+  // transport re-appends the in-flight assistant turn) or when a `resume`
+  // replays an entry. React requires unique keys per sibling, so handing it
+  // two `<Message key={message.id}>` with the same id throws the
+  // "two children with the same key" error we saw in dev. Collapse duplicate
+  // ids before mapping, keeping the first (canonical, earliest-positioned)
+  // copy — both copies carry identical content so nothing is lost.
+  const uniqueMessages = useMemo(() => {
+    const seen = new Set<string>()
+    const result: UIMessage[] = []
+    for (const message of messages) {
+      if (message.id) {
+        if (seen.has(message.id)) continue
+        seen.add(message.id)
+      }
+      result.push(message)
+    }
+    return result
+  }, [messages])
+
+  const { credential, provider, isKeyless } = useCredentials()
   const [text, setText] = useState("")
+
+  // A turn can be sent once a provider is active AND (it needs no key, or a
+  // credential is selected). A keyless (local) provider needs no credential.
+  const ready = provider != null && (isKeyless || credential != null)
 
   const isGenerating = status === "submitted" || status === "streaming"
 
@@ -222,7 +253,7 @@ function ChatConversation({
   }, [aiStop, transport, chatId])
 
   const handleSubmit = (message: PromptInputMessage) => {
-    if (!message.text.trim() || !credential) return
+    if (!message.text.trim() || !ready) return
     // PromptInput resets the textarea itself; keep `text` in sync.
     // The provider/model/credential ride along in the transport's
     // clientData — no per-message body needed.
@@ -247,7 +278,7 @@ function ChatConversation({
               }
             />
           ) : (
-            messages.map((message) => (
+            uniqueMessages.map((message) => (
               <Message from={message.role} key={message.id}>
                 <MessageContent>
                   {message.parts.map((part, i) =>
@@ -255,6 +286,19 @@ function ChatConversation({
                       <MessageResponse key={`${message.id}-${i}`}>
                         {part.text}
                       </MessageResponse>
+                    ) : part.type === "reasoning" ? (
+                      // The model's thinking — plus-icon disclosure. While a
+                      // reasoning part is the live edge of a streaming
+                      // message, the model is thinking *right now* (label
+                      // "Thinking…" + spinner); once text/tools follow, the
+                      // same row stays as a "read what it thought" toggle.
+                      <ChatReasoningPart
+                        key={`${message.id}-${i}`}
+                        streaming={
+                          isGenerating && i === message.parts.length - 1
+                        }
+                        text={part.text}
+                      />
                     ) : part.type.startsWith("tool-") ? (
                       <ChatToolPart key={`${message.id}-${i}`} part={part} />
                     ) : null
@@ -278,9 +322,9 @@ function ChatConversation({
               "Something went wrong. Check the provider and API key, then try again."}
           </p>
         )}
-        {!credential && (
+        {!provider && (
           <p className="pb-2 text-xs text-muted-foreground">
-            Choose a credential below to start chatting.
+            Choose a credential or a local provider below to start chatting.
           </p>
         )}
         <PromptInput onSubmit={handleSubmit}>
@@ -308,9 +352,10 @@ function ChatConversation({
                   sitting just left of the enter button. */}
               <CredentialPicker />
               {/* While generating this is the Stop button (onStop). Idle it
-                  is disabled until there is a credential and some text. */}
+                  is disabled until a provider is active (and, for keyed
+                  ones, a credential) and there's some text. */}
               <PromptInputSubmit
-                disabled={!isGenerating && (!credential || !text.trim())}
+                disabled={!isGenerating && (!ready || !text.trim())}
                 status={status}
                 onStop={stop}
               />

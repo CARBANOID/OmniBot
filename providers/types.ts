@@ -21,6 +21,14 @@ export interface ProviderConfig {
   // The models this provider offers.
   models: ProviderModel[]
   /**
+   * Whether this provider requires a saved API credential (a key in the DB).
+   * Defaults to true — every hosted provider does. A local/keyless provider
+   * (Ollama) sets this to false: the client then lets the user pick a model
+   * and send without selecting a credential, and trigger/chat.ts skips the
+   * credential lookup when it's set.
+   */
+  requiresApiKey?: boolean
+  /**
    * Build an AI SDK provider instance with the given API key. Passing
    * nothing lets the provider fall back to its env var
    * (e.g. GOOGLE_GENERATIVE_AI_API_KEY).

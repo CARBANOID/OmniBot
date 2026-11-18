@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { CarouselApi } from "@/components/ui/carousel";
 import {
   Carousel,
@@ -50,10 +50,10 @@ export const InlineCitationText = ({
 export type InlineCitationCardProps = ComponentProps<typeof HoverCard>;
 
 export const InlineCitationCard = (props: InlineCitationCardProps) => (
-  <HoverCard closeDelay={0} openDelay={0} {...props} />
+  <HoverCard {...props} />
 );
 
-export type InlineCitationCardTriggerProps = ComponentProps<typeof Badge> & {
+export type InlineCitationCardTriggerProps = ComponentProps<typeof Button> & {
   sources: string[];
 };
 
@@ -62,14 +62,27 @@ export const InlineCitationCardTrigger = ({
   className,
   ...props
 }: InlineCitationCardTriggerProps) => (
-  <HoverCardTrigger render={<Badge className={cn("ml-1 rounded-full", className)} variant="secondary" {...props} />}>{sources[0] ? (
-            <>
-              {new URL(sources[0]).hostname}{" "}
-              {sources.length > 1 && `+${sources.length - 1}`}
-            </>
-          ) : (
-            "unknown"
-          )}</HoverCardTrigger>
+  <HoverCardTrigger
+    delay={10}
+    closeDelay={100}
+    render={
+      <Button
+        className={cn("ml-1 rounded-full", className)}
+        size="xs"
+        variant="secondary"
+        {...props}
+      />
+    }
+  >
+    {sources[0] ? (
+      <>
+        {new URL(sources[0]).hostname}{" "}
+        {sources.length > 1 && `+${sources.length - 1}`}
+      </>
+    ) : (
+      "unknown"
+    )}
+  </HoverCardTrigger>
 );
 
 export type InlineCitationCardBodyProps = ComponentProps<"div">;
@@ -257,13 +270,21 @@ export const InlineCitationSource = ({
     {title && (
       <h4 className="truncate font-medium text-sm leading-tight">{title}</h4>
     )}
-    {url && (
-      <p className="truncate break-all text-muted-foreground text-xs">{url}</p>
-    )}
     {description && (
       <p className="line-clamp-3 text-muted-foreground text-sm leading-relaxed">
         {description}
       </p>
+    )}
+    {url && (
+      <a
+        href={url}
+        rel="noreferrer"
+        target="_blank"
+        className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+      >
+        {new URL(url).hostname.replace(/^www\./, "")}
+        <span className="sr-only"> (opens in a new tab)</span>
+      </a>
     )}
     {children}
   </div>
