@@ -26,6 +26,10 @@ interface ChatShellContextValue {
 
 const ChatShellContext = createContext<ChatShellContextValue | null>(null)
 
+// A stable no-op, for the inert panel context a group chat offers (one that
+// has no desktop panel at all, so the toggle can be a permanent do-nothing).
+const NOOP = () => {}
+
 export function useChatShell(): ChatShellContextValue {
   const ctx = useContext(ChatShellContext)
   if (ctx === null) {
@@ -46,12 +50,17 @@ export function useChatShell(): ChatShellContextValue {
 export function ChatShell({
   chatId,
   botName,
+  // False for group chats (several bots, no single one to run a desktop for):
+  // the right panel simply doesn't exist, and the panel state is inert — the
+  // child header just doesn't offer the button.
+  desktop = true,
   children,
 }: {
   chatId: string
   // The chat's bot, for the desktop pane's caption ("<name>'s screen").
   // Null when the chat has no bot (and hence no desktop).
   botName?: string | null
+  desktop?: boolean
   children: ReactNode
 }) {
   const [panelOpen, setPanelOpen] = useState(false)
@@ -75,6 +84,21 @@ export function ChatShell({
       setPanelOpen(false)
     }
   }, [])
+
+  // Group chats render the chat column standalone — no desktop pane, no
+  // handle — but the header still reads the panel context, which must
+  // therefore exist (inert).
+  if (!desktop) {
+    return (
+      <ChatShellContext.Provider
+        value={{ panelOpen: false, togglePanel: NOOP }}
+      >
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {children}
+        </div>
+      </ChatShellContext.Provider>
+    )
+  }
 
   return (
     <ChatShellContext.Provider value={{ panelOpen, togglePanel }}>

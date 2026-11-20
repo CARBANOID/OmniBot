@@ -1,5 +1,5 @@
 import { Daytona, DaytonaNotFoundError, type Sandbox } from "@daytona/sdk"
-import { eq } from "drizzle-orm"
+import { asc, eq } from "drizzle-orm"
 
 import { db } from "@/lib/db"
 import { bots, chatMembers } from "@/lib/db/schema"
@@ -70,36 +70,36 @@ export async function deleteSandbox(sandboxId: string): Promise<void> {
  * set) use this; `resolveChatSandbox` builds on it.
  */
 export async function chatBotId(chatId: string): Promise<string | null> {
+  // A group chat has several members — the chat's default voice is its
+  // earliest-joined bot, so the tie is by join order, not database luck.
   const [membership] = await db
     .select({ botId: chatMembers.botId })
     .from(chatMembers)
     .where(eq(chatMembers.chatId, chatId))
+    .orderBy(asc(chatMembers.joinedAt))
+    .limit(1)
   return membership?.botId ?? null
 }
 
 /**
- * Resolve the chat's bot's sandbox as a live, started handle. A direct chat
- * maps to exactly one bot (chatMembers); the bot's `sandboxId` is the link.
- * When the bot row has no sandbox (its create failed at bot-creation time)
- * one is created now and the id persisted — creation failures at bot-creation
- * are tolerated there, so this stays the recovery path.
+ * Resolve a bot's sandbox as a live, started handle. The bot's `sandboxId`
+ * is the link. When the bot row has no sandbox (its create failed at
+ * bot-creation time) one is created now and the id persisted — creation
+ * failures at bot-creation are tolerated there, so this stays the recovery
+ * path.
  *
  * A stored id that the platform no longer knows (destroyed or reclaimed) is
  * cleared from the row and replaced by a fresh sandbox instead of letting the
  * stale reference keep failing the chat. Other errors propagate — they are
  * user-visible in the tool result, and hiding them would mask real outages.
  */
-export async function resolveChatSandbox(chatId: string): Promise<Sandbox> {
-  const botId = await chatBotId(chatId)
-  if (!botId) {
-    throw new Error("This chat has no bot, so there is no sandbox to run in.")
-  }
+export async function resolveBotSandbox(botId: string): Promise<Sandbox> {
   const [bot] = await db
     .select({ sandboxId: bots.sandboxId })
     .from(bots)
     .where(eq(bots.id, botId))
   if (!bot) {
-    throw new Error("This chat's bot no longer exists.")
+    throw new Error("This bot no longer exists.")
   }
 
   const d = daytona()
@@ -117,6 +117,20 @@ export async function resolveChatSandbox(chatId: string): Promise<Sandbox> {
   const sandbox = await started(await d.create())
   await db.update(bots).set({ sandboxId: sandbox.id }).where(eq(bots.id, botId))
   return sandbox
+}
+
+/**
+ * Resolve the chat's default bot's sandbox (its earliest-joined member).
+ * A direct chat is one bot; a group chat's default voice is the first.
+ * A group turn answered by a *chosen* member calls `resolveBotSandbox` with
+ * that bot directly instead.
+ */
+export async function resolveChatSandbox(chatId: string): Promise<Sandbox> {
+  const botId = await chatBotId(chatId)
+  if (!botId) {
+    throw new Error("This chat has no bot, so there is no sandbox to run in.")
+  }
+  return resolveBotSandbox(botId)
 }
 
 // Sandbox states that mean "not usable" (the SDK's lifecycle vocabulary). A

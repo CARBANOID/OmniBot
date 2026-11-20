@@ -3,25 +3,29 @@ import { asc, desc, eq } from "drizzle-orm"
 
 import { db } from "@/lib/db"
 import { bots, chatMembers, chats } from "@/lib/db/schema"
+import type { GroupChatBot } from "@/lib/validations/chat"
 
-/** A chat as it should appear in the user's chat list. */
-export interface UserChat {
+/** The shared fields of every chat as it appears in the user's chat list. */
+interface UserChatBase {
   id: string
-  // Display name: the chat's own name, or the resolved bot's name for direct
-  // chats (whose `chats.name` is null).
+  // Display name: the chat's own name, or the first member bot's name for
+  // direct chats (whose `chats.name` is null).
   name: string
   preview: string | null
   lastMessageAt: Date
-  // Seed the bot's face is generated from (passed straight to ChatAvatar).
-  avatarSeed: string
 }
 
+/** A chat as it should appear in the user's chat list.
+ *
+ * A direct chat carries its single member's face seed; a group chat carries
+ * every member's face seed in join order — the group avatar tiles from them,
+ * and the first is the chat's default voice.
+ */
+export type UserChat =
+  | (UserChatBase & { kind: "direct"; avatarSeed: string })
+  | (UserChatBase & { kind: "group"; memberSeeds: string[] })
+
 // The signed-in user's chats, most recently active first.
-//
-// Each chat is resolved to a single bot — the one that joined first — which
-// supplies the avatar face and (for nameless direct chats) the display name.
-// There is no per-kind branch: a direct chat's only member and a group chat's
-// first member both reduce to "the first bot", which is all the sidebar needs.
 //
 // `auth()` is called here (rather than taking a userId) so this can only ever
 // return the *current* session's chats — the caller can never widen the scope.
@@ -31,13 +35,13 @@ export async function getUserChats(): Promise<UserChat[]> {
     return []
   }
 
-  // One row per (chat, bot) pair. A chat shows up N times (once per member
-  // bot), so we order each chat's rows by join order and keep only the first
-  // one — the earliest-joined bot. Sorting `lastMessageAt` first means the
-  // output is already grouped per chat and in the order we want to render.
+  // One row per (chat, bot) member, grouped per chat by activity and ordered
+  // by join order within it — so a chat's rows stay together in the order the
+  // group avatar should tile them. A direct chat is one such row.
   const rows = await db
     .select({
       id: chats.id,
+      kind: chats.kind,
       name: chats.name,
       preview: chats.lastMessagePreview,
       lastMessageAt: chats.lastMessageAt,
@@ -50,21 +54,65 @@ export async function getUserChats(): Promise<UserChat[]> {
     .where(eq(chats.userId, userId))
     .orderBy(desc(chats.lastMessageAt), asc(chatMembers.joinedAt))
 
-  const result: UserChat[] = []
-  const seen = new Set<string>()
+  // Collapse the per-chat rows into one entry, collecting the member faces in
+  // arrival (join) order. A chat with no member bot has no face to render, so
+  // it stays out of the list.
+  const byId = new Map<
+    string,
+    Pick<UserChatBase, "name" | "preview" | "lastMessageAt"> & {
+      kind: "direct" | "group"
+      memberSeeds: string[]
+    }
+  >()
   for (const row of rows) {
-    // Skip extra members of a chat we've already taken; and skip chats with no
-    // member bot, since without a bot there is no face to render.
-    if (seen.has(row.id) || !row.botAvatar) continue
-    seen.add(row.id)
-    result.push({
-      id: row.id,
-      name: row.name ?? row.botName ?? "",
-      preview: row.preview,
-      lastMessageAt: row.lastMessageAt,
-      avatarSeed: row.botAvatar,
-    })
+    if (!row.botAvatar) continue
+    let acc = byId.get(row.id)
+    if (!acc) {
+      // Groups are always named; a direct chat borrows its bot's name.
+      acc = {
+        name: row.name ?? row.botName ?? "",
+        preview: row.preview,
+        lastMessageAt: row.lastMessageAt,
+        kind: row.kind,
+        memberSeeds: [],
+      }
+      byId.set(row.id, acc)
+    }
+    acc.memberSeeds.push(row.botAvatar)
   }
 
-  return result
+  return [...byId.entries()].map(([id, acc]) =>
+    acc.kind === "group"
+      ? {
+          id,
+          name: acc.name,
+          preview: acc.preview,
+          lastMessageAt: acc.lastMessageAt,
+          kind: "group" as const,
+          memberSeeds: acc.memberSeeds,
+        }
+      : {
+          id,
+          name: acc.name,
+          preview: acc.preview,
+          lastMessageAt: acc.lastMessageAt,
+          kind: "direct" as const,
+          // A direct chat keeps its first-joined bot's face.
+          avatarSeed: acc.memberSeeds[0],
+        }
+  )
+}
+
+// The signed-in user's bots, in creation order — the pool a group chat can be
+// formed from (the dialog offers them, the server action re-checks ownership).
+export async function getUserBots(): Promise<GroupChatBot[]> {
+  const { isAuthenticated, userId } = await auth()
+  if (!isAuthenticated || !userId) {
+    return []
+  }
+  return db
+    .select({ id: bots.id, name: bots.name, avatar: bots.avatar })
+    .from(bots)
+    .where(eq(bots.userId, userId))
+    .orderBy(asc(bots.createdAt))
 }

@@ -32,8 +32,10 @@ import {
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input"
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
+import { BotPicker } from "@/components/bot-picker"
 import { ChatAvatar } from "@/components/chat-avatar"
 import { ChatReasoningPart, ChatToolPart } from "@/components/chat-tools"
+import { GroupChatAvatar } from "@/components/group-chat-avatar"
 import { CredentialEditButton } from "@/components/credentials/credential-edit-button"
 import { CredentialPicker } from "@/components/credentials/credential-picker"
 import {
@@ -49,15 +51,25 @@ import {
 import type { EditableBot } from "@/lib/validations/bot"
 import type { Credential } from "@/components/credentials/context"
 import { providerList } from "@/providers"
+import type { ChatMemberInfo } from "@/queries/chat"
 import type { omnibotChat } from "@/trigger/chat"
 
 export interface ChatProps {
   // The chat this conversation belongs to — the chatId of the Trigger.dev
   // chat agent's session, and the key of its stored transcript.
   chatId: string
+  // The chat's kind: a group chat swaps the single-bot empty state for the
+  // group avatar + name, and the composer offers the member bot picker.
+  kind?: "direct" | "group"
+  // The display name — shown by the group chat's empty state.
+  name?: string | null
   // The bot behind this chat, when there is one — its face greets the user in
-  // the empty state. null for a bot-less chat.
+  // the empty state. null for a bot-less chat (and for group chats, which
+  // have several bots and no single one).
   bot?: EditableBot | null
+  // The member bots in join order — several for a group chat; the first is
+  // the default voice. Absent/null for a bot-less direct chat.
+  members?: ChatMemberInfo[]
   // The user's saved credentials (fetched server-side by the page) — seeds
   // the credentials context.
   credentials?: Credential[]
@@ -80,13 +92,17 @@ export interface ChatProps {
 
 export function Chat({
   chatId,
+  kind = "direct",
+  name = null,
   bot,
+  members,
   credentials,
   initialSelectedId,
   initialActiveProviderId,
   initialModelId,
   initialMessages,
 }: ChatProps) {
+  const isGroup = kind === "group"
   return (
     <CredentialsProvider
       initial={credentials}
@@ -95,12 +111,38 @@ export function Chat({
     >
       <ChatGate
         chatId={chatId}
-        bot={bot}
+        name={name}
+        bot={isGroup ? null : bot ?? null}
+        members={isGroup ? (members ?? []) : null}
         initialModelId={initialModelId}
         initialMessages={initialMessages}
       />
     </CredentialsProvider>
   )
+}
+
+// The bot who answered a given turn. The agent stamps every assistant message
+// with a `data-group-bot` part carrying that bot's identity (trigger/chat.ts);
+// in a group chat it is the member the composer picked, in a direct chat the
+// single member. The part streams live and persists with the message, so the
+// same face shows on reload as it did while streaming. Messages stamped before
+// this feature exist carry no part, so this stays undefined there.
+type RespondingBot = { name: string; avatar: string }
+
+function respondingBotOf(message: UIMessage): RespondingBot | undefined {
+  const part = message.parts.find(
+    (candidate) => candidate.type === "data-group-bot",
+  ) as { data?: unknown } | undefined
+  const data = part?.data
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    typeof (data as { avatar?: unknown }).avatar === "string"
+  ) {
+    const bot = data as { name?: string; avatar: string }
+    return { name: bot.name ?? bot.avatar, avatar: bot.avatar }
+  }
+  return undefined
 }
 
 // Transport + transcript + the picker state that feeds the transport's
@@ -111,7 +153,13 @@ export function Chat({
 // `useLoadTranscript` hook loads it client-side behind a spinner.
 function ChatGate({
   chatId,
-  bot,
+  // The chat's display name (the group's, at least) — the empty state title.
+  name = null,
+  // The bot behind the chat (direct chats) — null for a group chat.
+  bot = null,
+  // The member bots (group chats) — null for a direct chat. Presence of a
+  // list is what makes this a group: several voices to pick from.
+  members = null,
   // Restored model pick — the page seeds it from the model cookie.
   initialModelId = null,
   // Prefetched by the page during SSR; null when the prefetch failed. See
@@ -119,10 +167,17 @@ function ChatGate({
   initialMessages = null,
 }: {
   chatId: string
+  name?: string | null
   bot?: EditableBot | null
+  members?: ChatMemberInfo[] | null
   initialModelId?: string | null
   initialMessages?: UIMessage[] | null
 }) {
+  // Which member bot answers (group chats) — the picker's state, live. A
+  // direct chat has exactly one member, which the agent resolves, so this
+  // stays null and never rides the wire. The default is the first member
+  // (the chat's default voice).
+  const [botId, setBotId] = useState<string | null>(members?.[0]?.id ?? null)
   const { credential, provider } = useCredentials()
 
   // The selected model; "reset when the provider changes" is derived, not
@@ -144,15 +199,17 @@ function ChatGate({
       provider.models[0].id)
     : providerList[0].models[0].id
 
-  // The provider/model/credential selection rides with every turn as
-  // clientData (live-updated as the picker changes) — only ids travel the
+  // The provider/model/credential/bot selection rides with every turn as
+  // clientData (live-updated as the pickers change) — only ids travel the
   // wire; the key is resolved + decrypted server-side by the agent. For a
-  // keyless (local) provider there is no credential id to send.
+  // keyless (local) provider there is no credential id to send, and a direct
+  // chat sends no bot id (its single member is the only answerer).
   const clientData = provider
     ? {
         provider: provider.id,
         model: effectiveModelId,
         ...(credential ? { credentialId: credential.id } : {}),
+        ...(botId ? { botId } : {}),
       }
     : undefined
 
@@ -175,7 +232,11 @@ function ChatGate({
     return (
       <ChatConversation
         chatId={chatId}
+        name={name}
         bot={bot}
+        members={members}
+        botId={botId}
+        onBotChange={setBotId}
         transport={transport}
         initialMessages={initialMessages}
         modelId={effectiveModelId}
@@ -187,7 +248,11 @@ function ChatGate({
   return (
     <ChatFallback
       chatId={chatId}
+      name={name}
       bot={bot}
+      members={members}
+      botId={botId}
+      onBotChange={setBotId}
       transport={transport}
       modelId={effectiveModelId}
       onModelChange={setModelId}
@@ -199,13 +264,21 @@ function ChatGate({
 // gate the conversation on it (spinner, then error).
 function ChatFallback({
   chatId,
+  name,
   bot,
+  members,
+  botId,
+  onBotChange,
   transport,
   modelId,
   onModelChange,
 }: {
   chatId: string
+  name?: string | null
   bot?: EditableBot | null
+  members?: ChatMemberInfo[] | null
+  botId: string | null
+  onBotChange: (id: string) => void
   transport: ReturnType<typeof useTriggerChatTransport>
   modelId: string
   onModelChange: (id: string) => void
@@ -238,7 +311,11 @@ function ChatFallback({
   return (
     <ChatConversation
       chatId={chatId}
+      name={name}
       bot={bot}
+      members={members}
+      botId={botId}
+      onBotChange={onBotChange}
       transport={transport}
       initialMessages={messages}
       modelId={modelId}
@@ -249,19 +326,34 @@ function ChatFallback({
 
 function ChatConversation({
   chatId,
+  name,
   bot,
+  members,
+  botId,
+  onBotChange,
   transport,
   initialMessages,
   modelId,
   onModelChange,
 }: {
   chatId: string
+  name?: string | null
   bot?: EditableBot | null
+  members?: ChatMemberInfo[] | null
+  botId: string | null
+  onBotChange: (id: string) => void
   transport: ReturnType<typeof useTriggerChatTransport>
   initialMessages: UIMessage[]
   modelId: string
   onModelChange: (id: string) => void
 }) {
+  const isGroup = members != null
+  // The group's currently-selected answerer (the empty state greets you by
+  // naming it, so a refresh into an empty group chat shows a person, not a
+  // committee).
+  const activeBot = isGroup
+    ? members?.find((member) => member.id === botId) ?? members?.[0]
+    : undefined
   // `resume` reconnects to an in-flight stream after a mid-answer refresh
   // (the transport replays from the loaded transcript's cursor); with an
   // empty transcript there is nothing to reconnect to yet.
@@ -332,19 +424,56 @@ function ChatConversation({
           {messages.length === 0 ? (
             <ConversationEmptyState
               icon={
-                bot ? (
+                isGroup && members && members.length > 0 ? (
+                  <GroupChatAvatar
+                    seeds={members.map((member) => member.avatar)}
+                    className="size-14"
+                  />
+                ) : bot ? (
                   <ChatAvatar seed={bot.avatar} animated className="size-14" />
                 ) : undefined
               }
-              title={bot ? bot.name : "Start the conversation"}
+              title={
+                isGroup && name
+                  ? name
+                  : activeBot
+                    ? activeBot.name
+                    : bot
+                      ? bot.name
+                      : "Start the conversation"
+              }
               description={
-                bot ? bot.job : "Send the first message to get things going."
+                isGroup
+                  ? `${members.length} bots are here. Pick one below and say hi.`
+                  : bot
+                    ? bot.job
+                    : "Send the first message to get things going."
               }
             />
           ) : (
-            uniqueMessages.map((message) => (
-              <Message from={message.role} key={message.id}>
-                <MessageContent>
+            uniqueMessages.map((message) => {
+              // The answering bot sits above its answer — the stamp the agent
+              // wrote into the message (`data-group-bot`). In a group chat this
+              // is the picked member, so you can tell who replied; in a direct
+              // chat it is the single bot. The user's own messages stay plain
+              // (their side is already right-aligned).
+              const responder =
+                message.role !== "user" ? respondingBotOf(message) : undefined
+              return (
+                <Message from={message.role} key={message.id}>
+                  {responder && (
+                    <div className="flex items-center gap-1.5">
+                      <ChatAvatar
+                        animated
+                        className="size-6 shrink-0"
+                        seed={responder.avatar}
+                      />
+                      <span className="text-xs font-medium">
+                        {responder.name}
+                      </span>
+                    </div>
+                  )}
+                  <MessageContent>
                   {message.parts.map((part, i) =>
                     part.type === "text" ? (
                       <MessageResponse key={`${message.id}-${i}`}>
@@ -369,7 +498,8 @@ function ChatConversation({
                   )}
                 </MessageContent>
               </Message>
-            ))
+              );
+            })
           )}
         </ConversationContent>
         {/* Needs to live inside <Conversation>: reads its scroll context. */}
@@ -394,7 +524,13 @@ function ChatConversation({
         <PromptInput onSubmit={handleSubmit}>
           <PromptInputTextarea
             onChange={(event) => setText(event.target.value)}
-            placeholder={bot ? `Message ${bot.name}…` : "Message…"}
+            placeholder={
+              isGroup
+                ? `Message ${activeBot?.name ?? "the group"}…`
+                : bot
+                  ? `Message ${bot.name}…`
+                  : "Message…"
+            }
             value={text}
           />
           <PromptInputFooter>
@@ -402,6 +538,15 @@ function ChatConversation({
               {/* The selected credential, when there is one: its label, and
                   it opens the update/delete editor. null until selected. */}
               <CredentialEditButton />
+              {/* Group chats pick the answering bot per turn — it rides the
+                  transport's clientData, like the model. */}
+              {isGroup && members && members.length > 0 && (
+                <BotPicker
+                  members={members}
+                  botId={activeBot?.id ?? members[0].id}
+                  onBotChange={onBotChange}
+                />
+              )}
               {/* Hidden entirely until a credential (provider) is selected. */}
               {provider && (
                 <ModelPicker

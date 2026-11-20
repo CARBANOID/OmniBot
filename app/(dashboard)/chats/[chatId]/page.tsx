@@ -98,11 +98,25 @@ export default async function ChatPage({
           </div>
         }
       >
-        <ChatShell chatId={chatId} botName={chat.bot?.name ?? null}>
-          <ChatHeader name={chat.name} bot={chat.bot} />
+        <ChatShell
+          chatId={chatId}
+          botName={chat.bot?.name ?? null}
+          // Group chats have several bots and no single one to run a desktop
+          // for — the right panel (and its handle) don't exist at all.
+          desktop={chat.kind !== "group"}
+        >
+          <ChatHeader
+            name={chat.name}
+            isGroup={chat.kind === "group"}
+            memberSeeds={chat.members.map((member) => member.avatar)}
+            bot={chat.bot}
+          />
           <ChatWithTranscript
             chatId={chatId}
+            kind={chat.kind}
+            name={chat.name}
             bot={chat.bot}
+            members={chat.members}
             credentials={credentialSeeds}
             initialSelectedId={initialSelectedId}
             initialActiveProviderId={initialActiveProviderId}

@@ -1,5 +1,5 @@
 import { isStepCount } from "ai"
-import { and, eq } from "drizzle-orm"
+import { asc, and, eq } from "drizzle-orm"
 import { chat } from "@trigger.dev/sdk/ai"
 import { z } from "zod"
 
@@ -66,13 +66,37 @@ export const omnibotChat = chat.agent({
     // always send their credential id; a keyless one has no saved credential,
     // so this is optional and must be absent for it.
     credentialId: z.string().optional(),
+    // Present only for a group chat: which member bot answers this turn
+    // (the composer's picker, live). A direct chat sends none — its single
+    // member is the only answerer, and the agent resolves it.
+    botId: z.string().optional(),
   }),
   // The bot's computer-use tools (shell, files, mouse, keyboard, screen),
   // rebuilt for each turn's chat id. Declaring them on the agent — not just
   // handing them to streamText — is what lets the SDK re-apply each tool's
   // toModelOutput when it re-converts saved history on later turns
   // (view_screen's image, show_screen's one-liner).
-  tools: ({ chatId }) => buildComputerUseTools(chatId),
+  //
+  // A group chat's per-turn pick (clientData.botId) is handed to the sandbox
+  // resolver too — the answering bot's desktop is where its work happens. It
+  // is validated against the chat's membership first: an unknown bot must not
+  // earn a sandbox (creation writes its bot row), so a forged id degrades to
+  // the chat's default bot instead.
+  tools: async ({ chatId, clientData }) => {
+    let botId: string | null = null
+    const requested = clientData?.botId
+    if (requested) {
+      const [member] = await db
+        .select({ botId: chatMembers.botId })
+        .from(chatMembers)
+        .where(
+          and(eq(chatMembers.chatId, chatId), eq(chatMembers.botId, requested))
+        )
+        .limit(1)
+      if (member) botId = requested
+    }
+    return buildComputerUseTools(chatId, botId)
+  },
   // Stream errors (rate limits, provider failures) are sanitized before they
   // reach the browser — the raw message can carry provider internals.
   uiMessageStreamOptions: {
@@ -120,29 +144,54 @@ export const omnibotChat = chat.agent({
       throw new Error("Unknown chat.")
     }
 
-    // One bot per direct chat: resolve it via the membership table. The row
-    // carries the identity the base instructions describe — name, job
-    // (what the bot is for), and instructions (how it should carry the job out).
-    const [membership] = await db
+    // Which bot answers this turn: the chat's members in join order. For a
+    // direct chat there is exactly one; for a group chat the composer's pick
+    // (clientData.botId) overrides the default (first member) — and is
+    // validated against the membership, so a bot outside the chat cannot
+    // answer in it. The row carries the identity the base instructions
+    // describe — name, job (what the bot is for), and instructions (how it
+    // should carry the job out).
+    const members = await db
       .select({ botId: chatMembers.botId })
       .from(chatMembers)
       .where(eq(chatMembers.chatId, chatId))
-    if (!membership) {
+      .orderBy(asc(chatMembers.joinedAt))
+    if (members.length === 0) {
       throw new Error("No bot is set up for this chat.")
+    }
+    let targetBotId = members[0].botId
+    if (clientData.botId) {
+      if (!members.some((member) => member.botId === clientData.botId)) {
+        throw new Error("That bot is not a member of this chat.")
+      }
+      targetBotId = clientData.botId
     }
     const [bot] = await db
       .select({
         name: bots.name,
+        avatar: bots.avatar,
         job: bots.job,
         instructions: bots.instructions,
         sandboxId: bots.sandboxId,
       })
       .from(bots)
-      .where(eq(bots.id, membership.botId))
+      .where(eq(bots.id, targetBotId))
       .limit(1)
     if (!bot) {
       throw new Error("No bot is set up for this chat.")
     }
+
+    // The transcript must remember WHICH bot said what: a group chat is
+    // answered by whichever member the composer picked for the turn, and even
+    // a direct chat's owner may want the bot's face by its reply. Stamp this
+    // assistant message with the answering bot's identity — `avatar` is the
+    // same seed the group avatar and the picker render from, so the face next
+    // to the message matches everywhere else. The data part streams live and
+    // persists with the message, so the stamp survives a reload.
+    chat.response.write({
+      type: "data-group-bot",
+      data: { id: targetBotId, name: bot.name, avatar: bot.avatar },
+    })
 
     // A keyless (local) provider — Ollama — needs no saved credential, so the
     // owner-scoped lookup + decrypt below only runs for keyed ones. For a

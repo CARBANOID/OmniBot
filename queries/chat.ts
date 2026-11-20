@@ -5,17 +5,30 @@ import { db } from "@/lib/db"
 import { bots, chatMembers, chats } from "@/lib/db/schema"
 import type { EditableBot } from "@/lib/validations/bot"
 
-/** A chat as it should appear in the chat header. */
+/** A member bot of a chat, in the order it joined (the first is the default voice). */
+export interface ChatMemberInfo {
+  id: string
+  name: string
+  // What the bot is for — offered as context in the group chat's empty state.
+  job: string
+  // Seed the bot's face is generated from (passed straight to the avatars).
+  avatar: string
+}
+
+/** A chat as it should appear on the chat page. */
 export interface Chat {
   id: string
-  // Display name: the chat's own name, or the resolved bot's name for direct
-  // chats (whose `chats.name` is null).
+  // Display name: the chat's own name (groups are always named; direct chats
+  // fall back to their bot's name).
   name: string
-  // The editable bot behind the chat (the one whose face/name is shown). Its
-  // `avatar` is the face seed, passed straight to ChatAvatar. null when the
-  // chat has no member bot — the header then shows no avatar and no edit
-  // button.
+  kind: "direct" | "group"
+  // The editable bot behind the chat (direct chats only) — the name/face the
+  // header's bot editor works on, and the composer's placeholder. Always null
+  // for a group chat (which has several bots and no single one to edit).
   bot: EditableBot | null
+  // Every member bot in join order — one for a direct chat, several for a
+  // group. Tiles the group avatar and feeds the composer's bot picker.
+  members: ChatMemberInfo[]
 }
 
 // Fetch a single chat by id, always scoped to the *current* session.
@@ -24,22 +37,19 @@ export interface Chat {
 // return the *current* session's chats — the caller can never widen the scope.
 // A chat somebody else owns is indistinguishable from a chat that does not
 // exist: both simply come back as null.
-//
-// The chat is resolved to a single bot — the one that joined first — which
-// supplies the avatar face and (for nameless direct chats) the display name.
-// Group chats are not treated specially: "the first member" is all the header
-// needs, exactly like the sidebar (see getUserChats in queries/bots.ts).
 export async function getChat(chatId: string): Promise<Chat | null> {
   const { isAuthenticated, userId } = await auth()
   if (!isAuthenticated || !userId) {
     return null
   }
 
-  // One row per (chat, bot) member. Ordered by join order and limited to the
-  // first row, the join resolves directly to the earliest-joined bot.
-  const [row] = await db
+  // One row per (chat, bot) member, in join order (the first is the default
+  // voice; a direct chat is a single row). The chat columns repeat on every
+  // row — they come from the outer join.
+  const rows = await db
     .select({
       id: chats.id,
+      kind: chats.kind,
       name: chats.name,
       botId: bots.id,
       botName: bots.name,
@@ -52,26 +62,47 @@ export async function getChat(chatId: string): Promise<Chat | null> {
     .leftJoin(bots, eq(chatMembers.botId, bots.id))
     .where(and(eq(chats.id, chatId), eq(chats.userId, userId)))
     .orderBy(asc(chatMembers.joinedAt))
-    .limit(1)
 
-  if (!row) {
+  const [chatRow] = rows
+  if (!chatRow) {
+    return null
+  }
+
+  const members: ChatMemberInfo[] = []
+  let first: (typeof rows)[number] | null = null
+  for (const row of rows) {
+    if (!row.botId) continue
+    if (!first) first = row
+    members.push({
+      id: row.botId,
+      // All bot columns are notNull (save instructions), so a present botId
+      // guarantees a fully-populated member — the left join only makes the
+      // *types* optional, so the three notNull columns are asserted back.
+      name: row.botName!,
+      job: row.botJob!,
+      avatar: row.botAvatar!,
+    })
+  }
+  // A chat with no member bot has no face to render and nothing to say —
+  // treat it as absent, the way the pre-group world did.
+  if (first === null) {
     return null
   }
 
   return {
-    id: row.id,
-    name: row.name ?? row.botName ?? "",
-    // All bot columns are notNull (save instructions), so a present botId
-    // guarantees a fully-populated editable bot; the left-join only makes the
-    // *types* optional, so we assert the three notNull columns back.
-    bot: row.botId
-      ? {
-          id: row.botId,
-          name: row.botName!,
-          job: row.botJob!,
-          instructions: row.botInstructions,
-          avatar: row.botAvatar!,
-        }
-      : null,
+    id: chatRow.id,
+    name: chatRow.name ?? members[0].name,
+    kind: chatRow.kind,
+    bot:
+      chatRow.kind === "direct"
+        ? {
+            id: first.botId!,
+            name: first.botName!,
+            job: first.botJob!,
+            instructions: first.botInstructions,
+            avatar: first.botAvatar!,
+          }
+        : null,
+    members,
   }
 }

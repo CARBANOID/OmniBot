@@ -14,6 +14,8 @@ import { useRouter } from "next/navigation"
 
 import { BotDialogContent } from "@/components/bot-dialog"
 import { ChatAvatar } from "@/components/chat-avatar"
+import { GroupChatAvatar } from "@/components/group-chat-avatar"
+import { GroupChatDialogContent } from "@/components/group-chat-dialog"
 import { Button } from "@/components/ui/button"
 import {
   Command,
@@ -45,6 +47,7 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import { contentColumnCenter } from "@/lib/content-center"
+import type { GroupChatBot } from "@/lib/validations/chat"
 import type { UserChat } from "@/queries/bots"
 
 // Clerk's UserButton ships its own trigger <button>, so it is hosted inside
@@ -89,14 +92,34 @@ function formatChatTime(date: Date, now: Date = new Date()): string {
   return format(date, "MMM d")
 }
 
+// A chat's face at a given size: the single member's avatar for a direct
+// chat, the tiled group avatar for a group. Identical footprint either way.
+function ChatAvatarFor({
+  chat,
+  className,
+}: {
+  chat: UserChat
+  className: string
+}) {
+  return chat.kind === "group" ? (
+    <GroupChatAvatar seeds={chat.memberSeeds} className={className} />
+  ) : (
+    <ChatAvatar seed={chat.avatarSeed} className={className} />
+  )
+}
+
 interface AppSidebarProps {
   // The signed-in user's chats, most recently active first (see queries/bots).
   chats: UserChat[]
+  // The signed-in user's bots — the pool the group chat dialog offers as
+  // members (ownership is re-checked server-side by the action).
+  bots: GroupChatBot[]
 }
 
-export function AppSidebar({ chats }: AppSidebarProps) {
+export function AppSidebar({ chats, bots }: AppSidebarProps) {
   const router = useRouter()
   const [createBotOpen, setCreateBotOpen] = useState(false)
+  const [createGroupChatOpen, setCreateGroupChatOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   // Horizontal center of the content column (the region right of the
   // sidebar). Captured on open so the dialog — portaled to <body> and
@@ -150,7 +173,7 @@ export function AppSidebar({ chats }: AppSidebarProps) {
                 <BotIcon />
                 Create a new bot
               </DropdownMenuItem>
-              <DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setCreateGroupChatOpen(true)}>
                 <MessagesSquareIcon />
                 Create a group chat
               </DropdownMenuItem>
@@ -187,7 +210,7 @@ export function AppSidebar({ chats }: AppSidebarProps) {
                       className="h-auto p-2.5 group-data-[collapsible=icon]:size-12! group-data-[collapsible=icon]:justify-center"
                       tooltip={chat.name}
                     >
-                      <ChatAvatar seed={chat.avatarSeed} className="size-7" />
+                      <ChatAvatarFor chat={chat} className="size-7" />
                       <span className="flex min-w-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
                         <span className="flex items-center gap-2">
                           {/* flex-1 so the name claims the free space and pins the
@@ -237,6 +260,15 @@ export function AppSidebar({ chats }: AppSidebarProps) {
       <Dialog open={createBotOpen} onOpenChange={setCreateBotOpen}>
         <BotDialogContent onSuccess={() => setCreateBotOpen(false)} />
       </Dialog>
+      <Dialog
+        open={createGroupChatOpen}
+        onOpenChange={setCreateGroupChatOpen}
+      >
+        <GroupChatDialogContent
+          bots={bots}
+          onSuccess={() => setCreateGroupChatOpen(false)}
+        />
+      </Dialog>
       <CommandDialog
         open={searchOpen}
         onOpenChange={setSearchOpen}
@@ -259,7 +291,7 @@ export function AppSidebar({ chats }: AppSidebarProps) {
                     router.push(`/chats/${chat.id}`)
                   }}
                 >
-                  <ChatAvatar seed={chat.avatarSeed} className="size-6" />
+                  <ChatAvatarFor chat={chat} className="size-6" />
                   <span className="truncate">{chat.name}</span>
                 </CommandItem>
               ))}

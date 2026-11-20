@@ -1,9 +1,11 @@
 // The computer-use toolset behind a bot's chat: the shell, the files, and
 // control of the desktop in its Daytona sandbox — mouse, keyboard, screen.
 //
-// `buildComputerUseTools(chatId)` closes the set around the *chat's* id, and
-// every tool resolves that chat's bot sandbox lazily on first use (inside
-// `execute`) — never at declaration time. The SDK's history-conversion pass
+// `buildComputerUseTools(chatId, botId)` closes the set around where the
+// work happens: the answering bot's sandbox when `botId` names one (a group
+// chat's per-turn pick), else the chat's default bot (first-joined member).
+// Tools resolve that sandbox lazily on first use (inside `execute`) — never
+// at declaration time. The SDK's history-conversion pass
 // only reads `inputSchema` and `toModelOutput`, so declaring tools must stay
 // I/O-free; doing a sandbox lookup there would hit the network on every turn.
 //
@@ -18,55 +20,63 @@ import { type Sandbox } from "@daytona/sdk"
 import { tool, type ToolSet } from "ai"
 import { z } from "zod"
 
-import { ensureComputerUse, resolveChatSandbox } from "@/lib/daytona"
+import {
+  ensureComputerUse,
+  resolveBotSandbox,
+  resolveChatSandbox,
+} from "@/lib/daytona"
 
 // ---------------------------------------------------------------------------
 // Sandbox resolution: memoized per chat, one automatic retry on a dead handle
 // ---------------------------------------------------------------------------
 
-// The worker process outlives any single chat, and a bot's sandbox is the
-// only long-lived object we cache, so the map is capped; the least recently
-// resolved chat is evicted first.
-const sandboxByChat = new Map<string, Promise<Sandbox>>()
+// The sandbox lives per BOT (bots.sandboxId): a bot that answers in two
+// chats shares one sandbox, so the cache is keyed by the bot id when the
+// turn names one, and by the chat id when it doesn't (the chat's default bot
+// then resolves lazily behind it). The worker process outlives any single
+// chat, and a bot's sandbox is the only long-lived object we cache — cap the
+// map and evict the least recently resolved entry first.
+const sandboxByKey = new Map<string, Promise<Sandbox>>()
 const MAX_CACHED_SANDBOXES = 32
 
 function rememberSandbox(
-  chatId: string,
+  key: string,
   sandbox: Promise<Sandbox>
 ): Promise<Sandbox> {
-  sandboxByChat.delete(chatId)
-  sandboxByChat.set(chatId, sandbox)
-  while (sandboxByChat.size > MAX_CACHED_SANDBOXES) {
-    const oldest = sandboxByChat.keys().next().value
+  sandboxByKey.delete(key)
+  sandboxByKey.set(key, sandbox)
+  while (sandboxByKey.size > MAX_CACHED_SANDBOXES) {
+    const oldest = sandboxByKey.keys().next().value
     if (oldest === undefined) break
-    sandboxByChat.delete(oldest)
+    sandboxByKey.delete(oldest)
   }
   return sandbox
 }
 
-function getSandbox(chatId: string): Promise<Sandbox> {
-  return (
-    sandboxByChat.get(chatId) ??
-    rememberSandbox(chatId, resolveChatSandbox(chatId))
-  )
+function getSandbox(
+  key: string,
+  resolve: () => Promise<Sandbox>
+): Promise<Sandbox> {
+  return sandboxByKey.get(key) ?? rememberSandbox(key, resolve())
 }
 
 /**
- * Every tool body runs through this: it resolves the chat's sandbox and
+ * Every tool body runs through this: it resolves the named sandbox and
  * performs `operation` on it. If the call fails and a cached handle was in
  * play, the cache entry is dropped and the operation is retried once against
  * a freshly resolved sandbox — a sandbox destroyed or reclaimed by Daytona
  * mid-session would otherwise stay pinned for the worker's life.
  */
 async function withSandbox<T>(
-  chatId: string,
+  key: string,
+  resolve: () => Promise<Sandbox>,
   operation: (sandbox: Sandbox) => Promise<T>
 ): Promise<T> {
   try {
-    return await operation(await getSandbox(chatId))
+    return await operation(await getSandbox(key, resolve))
   } catch (error) {
-    if (!sandboxByChat.delete(chatId)) throw error
-    return operation(await getSandbox(chatId))
+    if (!sandboxByKey.delete(key)) throw error
+    return operation(await getSandbox(key, resolve))
   }
 }
 
@@ -174,12 +184,32 @@ const READ_FILE_LIMIT = 30_000 // characters of file content
 const MAX_LIST_ENTRIES = 500 // rows returned by list_files
 
 /**
- * The full computer-use toolset for one chat, closed over that chat's id.
- * Declaration is pure (see the note at the top) — every call defers to the
- * sandbox on demand, so this is what the agent's per-turn `tools` resolves
- * to.
+ * The full computer-use toolset for one chat, closed over where its work
+ * happens. Declaration is pure (see the note at the top) — every call
+ * defers to the sandbox on demand, so this is what the agent's per-turn
+ * `tools` resolves to.
+ *
+ * `botId` names the answering bot's sandbox (a group chat's per-turn pick,
+ * validated against the chat's membership before it gets here). Without it
+ * the set falls back to the chat's default bot (first-joined member).
  */
-export function buildComputerUseTools(chatId: string): ToolSet {
+export function buildComputerUseTools(
+  chatId: string,
+  botId: string | null = null
+): ToolSet {
+  // The sandbox is a bot thing: cache it where it actually lives (the bot
+  // row), or lazily resolve the chat's default bot behind the chat id.
+  const key = botId ?? chatId
+  const resolve = botId
+    ? () => resolveBotSandbox(botId)
+    : () => resolveChatSandbox(chatId)
+
+  function withSandboxFor<T>(
+    operation: (sandbox: Sandbox) => Promise<T>
+  ): Promise<T> {
+    return withSandbox(key, resolve, operation)
+  }
+
   return {
     // ----- Terminal -------------------------------------------------------
     run_bash: tool({
@@ -211,7 +241,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ command, cwd, timeout }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             const response = await sandbox.process.executeCommand(
               command,
               cwd,
@@ -261,7 +291,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ path, offset, limit }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             const buffer = await sandbox.fs.downloadFile(path)
             // A null byte anywhere early marks the file as binary.
             if (buffer.subarray(0, 8192).includes(0)) {
@@ -309,7 +339,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ path, content }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             const slash = path.lastIndexOf("/")
             if (slash > 0) {
               await sandbox.process.executeCommand(
@@ -344,7 +374,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ path, depth }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             const target = path ?? "."
             const files = await sandbox.fs.listFiles(target, {
               depth: depth ?? 1,
@@ -398,7 +428,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ x, y, button, double, clicks }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             await ensureComputerUse(sandbox)
             const res = await sandbox.computerUse.mouse.click(
               x,
@@ -432,7 +462,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ x, y }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             await ensureComputerUse(sandbox)
             const res = await sandbox.computerUse.mouse.move(x, y)
             return { moved: true, x: res.x ?? x, y: res.y ?? y }
@@ -470,7 +500,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ x, y, direction, amount }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             await ensureComputerUse(sandbox)
             const scrolled = await sandbox.computerUse.mouse.scroll(
               x,
@@ -502,7 +532,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ text, delay }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             await ensureComputerUse(sandbox)
             await sandbox.computerUse.keyboard.type(text, delay)
             return { typed: true, chars: text.length }
@@ -531,7 +561,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       }),
       execute: async ({ key, modifiers }) => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             await ensureComputerUse(sandbox)
             await sandbox.computerUse.keyboard.press(key, modifiers)
             return { pressed: true, key, modifiers: modifiers ?? [] }
@@ -551,7 +581,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       inputSchema: z.object({}),
       execute: async () => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             return { ...(await takeScreenshot(sandbox)) }
           })
         } catch (error) {
@@ -603,7 +633,7 @@ export function buildComputerUseTools(chatId: string): ToolSet {
       inputSchema: z.object({}),
       execute: async () => {
         try {
-          return await withSandbox(chatId, async (sandbox) => {
+          return await withSandboxFor(async (sandbox) => {
             const [image, size] = await Promise.all([
               takeScreenshot(sandbox),
               displaySize(sandbox),

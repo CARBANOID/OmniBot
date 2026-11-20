@@ -5,6 +5,18 @@ import { cn } from "cn"
 
 const gaze = new Style(gazeDefinition)
 
+// A deterministically generated face from the seed, as a data URI. Shared by
+// the single (ChatAvatar) and group (GroupChatAvatar) avatars so a bot's face
+// looks identical wherever it renders.
+export function chatAvatarUri(seed: string, animated = false): string {
+  return new Avatar(gaze, {
+    seed,
+    // The gaze style ships its animation component off by default; the
+    // `animation` tag turns it on and lets the seed pick the speed.
+    ...(animated ? { tags: ["animation"] } : {}),
+  }).toDataUri()
+}
+
 export interface ChatAvatarProps {
   /** The seed the avatar is deterministically generated from. */
   seed: string
@@ -19,16 +31,9 @@ export interface ChatAvatarProps {
 }
 
 export function ChatAvatar({ seed, animated, className }: ChatAvatarProps) {
-  const src = new Avatar(gaze, {
-    seed,
-    // The gaze style ships its animation component off by default; the
-    // `animation` tag turns it on and lets the seed pick the speed.
-    ...(animated ? { tags: ["animation"] } : {}),
-  }).toDataUri()
-
   return (
     <Image
-      src={src}
+      src={chatAvatarUri(seed, animated)}
       alt={seed}
       width={32}
       height={32}

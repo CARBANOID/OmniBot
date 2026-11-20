@@ -3,7 +3,7 @@ import { cookies } from "next/headers"
 import { SIDEBAR_COOKIE_NAME } from "@/lib/sidebar"
 import { SidebarProvider } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
-import { getUserChats } from "@/queries/bots"
+import { getUserBots, getUserChats } from "@/queries/bots"
 
 export default async function DashboardLayout({
   children,
@@ -12,6 +12,8 @@ export default async function DashboardLayout({
 }>) {
   // Server-rendered once per request; the client sidebar just paints it.
   const chats = await getUserChats()
+  // The user's bots pool the group chat dialog (membership offers).
+  const bots = await getUserBots()
 
   // Paint the sidebar in its saved state from the first byte of HTML. Reading
   // the cookie client-side (SidebarProvider does this too) is too late: the
@@ -22,7 +24,7 @@ export default async function DashboardLayout({
 
   return (
     <SidebarProvider defaultOpen={saved !== "false"}>
-      <AppSidebar chats={chats} />
+      <AppSidebar chats={chats} bots={bots} />
       {children}
     </SidebarProvider>
   )
