@@ -70,6 +70,12 @@ export interface ChatProps {
   // The model to restore after a refresh — the page reads it from its
   // selection cookie and passes it only when it names a real registry model.
   initialModelId?: string | null
+  // The prefetched transcript (page.tsx → queries/transcript.ts) — the
+  // conversation as the trigger platform stored it, loaded during SSR.
+  // Present (even as `[]`, a brand-new chat) it is authoritative for this
+  // render; null means the prefetch failed and the client-side
+  // `useLoadTranscript` hook falls back to its own load + spinner.
+  initialMessages?: UIMessage[] | null
 }
 
 export function Chat({
@@ -79,6 +85,7 @@ export function Chat({
   initialSelectedId,
   initialActiveProviderId,
   initialModelId,
+  initialMessages,
 }: ChatProps) {
   return (
     <CredentialsProvider
@@ -86,24 +93,35 @@ export function Chat({
       initialSelectedId={initialSelectedId}
       initialActiveProviderId={initialActiveProviderId}
     >
-      <ChatGate chatId={chatId} bot={bot} initialModelId={initialModelId} />
+      <ChatGate
+        chatId={chatId}
+        bot={bot}
+        initialModelId={initialModelId}
+        initialMessages={initialMessages}
+      />
     </CredentialsProvider>
   )
 }
 
-// Transport + transcript load + the picker state that feeds the transport's
-// clientData live here. The useChat component only mounts once the
-// transcript has loaded: its initial messages and the transport's resume
-// cursor must describe the same saved conversation.
+// Transport + transcript + the picker state that feeds the transport's
+// clientData live here, ahead of the useChat component, whose initial
+// messages and the transport's resume cursor must describe the same saved
+// conversation. Two ways in: the page normally prefetched the transcript
+// during SSR (initialMessages) and it mounts straight away; otherwise the
+// `useLoadTranscript` hook loads it client-side behind a spinner.
 function ChatGate({
   chatId,
   bot,
   // Restored model pick — the page seeds it from the model cookie.
   initialModelId = null,
+  // Prefetched by the page during SSR; null when the prefetch failed. See
+  // ChatProps.initialMessages.
+  initialMessages = null,
 }: {
   chatId: string
   bot?: EditableBot | null
   initialModelId?: string | null
+  initialMessages?: UIMessage[] | null
 }) {
   const { credential, provider } = useCredentials()
 
@@ -146,6 +164,52 @@ function ChatGate({
     clientData,
   })
 
+  // The page prefetched the transcript during SSR — it is in the initial
+  // HTML, and a chatId cannot change while this page is mounted (it is the
+  // route param, so switching chats remounts). The hook would just repeat
+  // the same presign + fetch round trip for identical data, so the seeded
+  // history mounts straight away; `null` (prefetch failed) falls back to
+  // <ChatFallback/>, a component of its own so `useLoadTranscript` stays
+  // unconditionally called in its render.
+  if (initialMessages) {
+    return (
+      <ChatConversation
+        chatId={chatId}
+        bot={bot}
+        transport={transport}
+        initialMessages={initialMessages}
+        modelId={effectiveModelId}
+        onModelChange={setModelId}
+      />
+    )
+  }
+
+  return (
+    <ChatFallback
+      chatId={chatId}
+      bot={bot}
+      transport={transport}
+      modelId={effectiveModelId}
+      onModelChange={setModelId}
+    />
+  )
+}
+
+// The page's SSR prefetch failed — load the transcript client-side and
+// gate the conversation on it (spinner, then error).
+function ChatFallback({
+  chatId,
+  bot,
+  transport,
+  modelId,
+  onModelChange,
+}: {
+  chatId: string
+  bot?: EditableBot | null
+  transport: ReturnType<typeof useTriggerChatTransport>
+  modelId: string
+  onModelChange: (id: string) => void
+}) {
   const { messages, isLoading, error } = useLoadTranscript(
     chatId,
     loadChatTranscript,
@@ -177,8 +241,8 @@ function ChatGate({
       bot={bot}
       transport={transport}
       initialMessages={messages}
-      modelId={effectiveModelId}
-      onModelChange={setModelId}
+      modelId={modelId}
+      onModelChange={onModelChange}
     />
   )
 }

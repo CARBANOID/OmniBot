@@ -12,7 +12,8 @@
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "vendor:novnc": "node scripts/vendor-novnc.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.85",
@@ -30,6 +31,7 @@
     "@hookform/resolvers": "^5.9.2",
     "@neon/config": "^1.9.3",
     "@neon/env": "^1.6.4",
+    "@novnc/novnc": "1.6.0",
     "@radix-ui/react-use-controllable-state": "^1.3.0",
     "@rive-app/react-webgl2": "^4.37.0",
     "@shadcn/react": "^0.3.1",

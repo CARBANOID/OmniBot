@@ -162,3 +162,20 @@ export async function ensureComputerUse(sandbox: Sandbox): Promise<void> {
   }
   await sandbox.computerUse.start()
 }
+
+/**
+ * Mint a signed preview URL for the chat's bot desktop — the noVNC web
+ * console served by the sandbox on port 6080. Bring the sandbox up, make
+ * sure the desktop stack is running, then sign a URL that works from any
+ * browser without credentials (no API key header needed — that's the whole
+ * point of it).
+ *
+ * One hour: long enough for a session, short enough to force a fresh mint
+ * (actions/desktop.ts mints again on every refresh) whenever the sandbox
+ * has since been resumed.
+ */
+export async function desktopPreviewUrl(chatId: string): Promise<string> {
+  const sandbox = await resolveChatSandbox(chatId)
+  await ensureComputerUse(sandbox)
+  return (await sandbox.getSignedPreviewUrl(6080, 3600)).url
+}

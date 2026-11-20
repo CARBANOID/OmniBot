@@ -2,6 +2,7 @@
 
 import { MonitorIcon } from "lucide-react"
 
+import { useChatShell } from "@/components/chat-shell"
 import { BotEditDialog } from "@/components/bot-edit-dialog"
 import { Button } from "@/components/ui/button"
 import type { EditableBot } from "@/lib/validations/bot"
@@ -16,6 +17,10 @@ export interface ChatHeaderProps {
 }
 
 export function ChatHeader({ name, bot }: ChatHeaderProps) {
+  // Toggles the right-hand panel of the page's <ChatShell> (see the shell
+  // in page.tsx); it renders with the header, so this is live on first paint.
+  const { panelOpen, togglePanel } = useChatShell()
+
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 p-2">
       {bot ? (
@@ -24,13 +29,16 @@ export function ChatHeader({ name, bot }: ChatHeaderProps) {
       ) : (
         <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{name}</h1>
       )}
-      {/* Placeholder: the desktop-app entry point is not wired up yet. */}
+      {/* The desktop-app entry point: shows/hides the shell's right panel.
+          Pressed (open) it reads as "close the panel". */}
       <Button
         type="button"
         variant="ghost"
         size="icon"
-        aria-label="Desktop"
+        aria-label={panelOpen ? "Close the desktop panel" : "Open the desktop panel"}
+        aria-pressed={panelOpen}
         className="ml-auto"
+        onClick={togglePanel}
       >
         <MonitorIcon />
       </Button>

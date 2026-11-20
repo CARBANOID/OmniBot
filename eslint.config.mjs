@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored, generated code (the self-hosted noVNC RFB core) — not ours to lint.
+    "lib/vendor/**",
   ]),
 ]);
 
