@@ -49,6 +49,7 @@
 }
 
 :root {
+    color-scheme: light;
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);
     --card: oklch(1 0 0);
@@ -84,6 +85,7 @@
 }
 
 .dark {
+    color-scheme: dark;
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
@@ -138,4 +140,39 @@
     width: 0;
     height: 0;
     }
+
+  /* Self-hosted noVNC (components/desktop-pane.tsx) inlines the `.screen`
+     wrapper's background once, at connect time — a snapshot of the theme in
+     effect then, or its default rgb(40,40,40) — and inline styles ignore
+     later theme flips. Pin the live design token instead: !important beats
+     the inline write no matter when it happened, and var(--background)
+     re-resolves the instant next-themes toggles .dark on <html>. So the
+     full-screen letterbox follows the current theme even on a session that
+     connected under the other one — no reconnect required. */
+  [data-vnc-root] > div:first-of-type {
+    background: var(--background) !important;
+    }
+}
+
+/* Respect `prefers-reduced-motion`: spatial animation is removed, not
+   globally time-warped. Entry/exit animations snap to their final state
+   (tw-animate's fill-mode is none, so elements settle to their base style
+   and animationend still fires for the exit sequences that rely on it),
+   and persistent spinners/pulses sit still. Non-spatial transitions
+   (colors, opacity) stay intact. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-in,
+  .animate-out {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
+  .animate-spin,
+  .animate-pulse {
+    animation: none;
+  }
+  /* Spatial (transform/translate/zoom) transitions snap instead of easing. */
+  [data-slot="toast"],
+  [data-slot="navigation-menu-content"] {
+    transition-duration: 0s !important;
+  }
 }

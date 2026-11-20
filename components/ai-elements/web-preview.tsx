@@ -151,6 +151,15 @@ export const WebPreviewUrl = ({
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
       if (event.key === "Enter") {
+        // While an IME composition is confirming a conversion, Enter must not
+        // navigate (event.isComposing alone misses Safari's out-of-order
+        // keydown; the keyCode 229 check catches it).
+        const native = event.nativeEvent;
+        if (native.isComposing || native.keyCode === 229) {
+          return;
+        }
+        // Don't let the default implicit-submission/newline action run too.
+        event.preventDefault();
         const target = event.target as HTMLInputElement;
         setUrl(target.value);
       }

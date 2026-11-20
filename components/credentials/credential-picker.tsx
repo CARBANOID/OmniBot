@@ -128,8 +128,8 @@ export function CredentialPicker() {
             <CommandList>
               <CommandEmpty>No credentials found.</CommandEmpty>
               <CommandGroup>
-                {[...credentials]
-                  .sort((a, b) => {
+                {credentials
+                  .toSorted((a, b) => {
                     // The active credential always leads the list.
                     if (a.id === selectedId) return -1
                     if (b.id === selectedId) return 1

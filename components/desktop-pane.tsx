@@ -1,12 +1,6 @@
 "use client"
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { getDesktopPreviewUrl } from "@/actions/desktop"
 import { Button } from "@/components/ui/button"
@@ -34,10 +28,11 @@ import { ExpandIcon, RefreshCwIcon, XIcon } from "lucide-react"
 // no scrollbar UI at all. The cross-origin WebSocket to Daytona's websockify
 // is accepted (no Origin restriction), which is what makes this work.
 //
-// Layout (per docs/pics/vnc.png): a black panel with the live preview in a
-// bordered 4:3 box pinned to the top — never centered in a full-height area —
-// the bot's name beneath it ("<name>'s screen"), and the Refresh / Full screen
-// actions in a slim top row.
+// Layout (per docs/pics/vnc.png): the live preview in a bordered 4:3 box
+// pinned to the top — never centered in a full-height area — the bot's name
+// beneath it ("<name>'s screen"), and the Refresh / Full screen actions in a
+// slim top row. Colors ride the app's light/dark theme via the design tokens
+// (background / foreground / muted / border) — nothing is fixed to dark.
 //
 // The signed URL is minted server-side (actions/desktop.ts) *lazily* — on first
 // panel open and on every Refresh — so nothing Daytona-related blocks page
@@ -201,14 +196,24 @@ export function DesktopPane({
 
       // Clear any previous session's `.screen` wrapper: noVNC leaves it in
       // place on disconnect, so a stale one would otherwise stack.
-      container.innerHTML = ""
+      container.replaceChildren()
 
       const rfb = new RFB(container, wsUrl, { shared: true })
       instance = rfb
       rfbRef.current = rfb
       // The core constructor only reads `shared`; background/scale/clip are
       // properties, and setting them is what engages fit-to-container scaling.
-      rfb.background = "#000"
+      // `background` is noVNC's `.screen` wrapper's inline style — the
+      // letterbox around a scaled canvas (the fullscreen strips) — and noVNC
+      // assigns the string verbatim (`this._screen.style.background = cssValue`).
+      // Pass the token as a CSS variable, not a resolved color: variables are
+      // re-resolved on every paint, so a theme flip (the `.dark` class the
+      // provider puts on <html>) updates the letterbox live with no listener.
+      // A getComputedStyle snapshot of the connect-time value would stay stale.
+      // The [data-vnc-root] rule in globals.css enforces the same value via
+      // !important, so even a session whose inline write predates the CSS
+      // (or noVNC's rgb(40,40,40) default) still follows the current theme.
+      rfb.background = "var(--background)"
       rfb.scaleViewport = true
       rfb.clipViewport = false
 
@@ -265,14 +270,14 @@ export function DesktopPane({
       <section
         aria-label={screenLabel}
         className={cn(
-          "flex h-full min-w-0 flex-col overflow-hidden bg-black",
+          "flex h-full min-w-0 flex-col overflow-hidden bg-background",
           // Full screen: pin above the dialog's backdrop, cover the viewport.
           fullscreen && "fixed inset-0 z-[60]"
         )}
       >
         {/* Actions: Refresh sits rightmost, as in the design. Full screen
-            shows X in place of the expand control. Fixed light-on-dark colors:
-            the pane is always black, whatever the app theme is. */}
+            shows X in place of the expand control. Ghost buttons pick up the
+            app theme — no fixed light-on-dark overrides. */}
         <div className="flex shrink-0 items-center justify-end gap-1 p-2">
           {fullscreen ? (
             <Button
@@ -282,7 +287,6 @@ export function DesktopPane({
               aria-label="Exit full screen"
               title="Exit full screen"
               disabled={!url}
-              className="text-zinc-300 hover:bg-zinc-800 hover:text-white"
               onClick={() => setFullscreen(false)}
             >
               <XIcon className="size-4" />
@@ -296,7 +300,6 @@ export function DesktopPane({
               aria-label="Open the desktop in full screen"
               title="Open the desktop in full screen"
               disabled={!url}
-              className="text-zinc-300 hover:bg-zinc-800 hover:text-white"
               onClick={() => setFullscreen(true)}
             >
               <ExpandIcon className="size-4" />
@@ -310,10 +313,11 @@ export function DesktopPane({
             aria-label="Refresh the desktop"
             title="Refresh the desktop"
             disabled={minting}
-            className="text-zinc-300 hover:bg-zinc-800 hover:text-white"
             onClick={() => void refresh()}
           >
-            <RefreshCwIcon className={cn("size-4", minting && "animate-spin")} />
+            <RefreshCwIcon
+              className={cn("size-4", minting && "animate-spin")}
+            />
             <span className="sr-only">Refresh the desktop</span>
           </Button>
         </div>
@@ -336,7 +340,7 @@ export function DesktopPane({
         >
           <div
             className={cn(
-              "relative w-full overflow-hidden rounded-md border border-zinc-800 bg-black",
+              "relative w-full overflow-hidden rounded-md border border-border bg-muted",
               // noVNC's `scaleViewport` fits the sandbox screen inside this box;
               // a 4:3 box matches the sandbox's native aspect, so the screen
               // lands edge-to-edge (top-aligned, not letterboxed mid-panel).
@@ -346,12 +350,13 @@ export function DesktopPane({
           >
             {error ? (
               <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-                <p className="max-w-xs text-sm text-zinc-400">{error}</p>
+                <p className="max-w-xs text-sm text-muted-foreground">
+                  {error}
+                </p>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 hover:text-white"
                   onClick={() => void refresh()}
                 >
                   Try again
@@ -361,24 +366,26 @@ export function DesktopPane({
               <>
                 {/* The RFB mounts into this. `absolute inset-0` fills the box;
                     noVNC's `.screen` (width/height 100%) fills this, and its
-                    canvas is scaled to fit by `scaleViewport`. */}
+                    canvas is scaled to fit by `scaleViewport`.
+                    `data-vnc-root` scopes the globals.css rule that themes the
+                    `.screen` letterbox live — see it there. */}
                 <div
                   ref={containerRef}
+                  data-vnc-root
                   aria-hidden={phase !== "live"}
                   className="absolute inset-0"
                 />
                 {showOverlay && (
-                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black p-6 text-center">
+                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background p-6 text-center">
                     {phase === "lost" ? (
                       <>
-                        <p className="max-w-xs text-sm text-zinc-400">
+                        <p className="max-w-xs text-sm text-muted-foreground">
                           The desktop connection was lost.
                         </p>
                         <Button
                           type="button"
                           variant="outline"
                           size="sm"
-                          className="border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 hover:text-white"
                           onClick={() => void refresh()}
                         >
                           Reconnect
@@ -387,7 +394,7 @@ export function DesktopPane({
                     ) : (
                       <>
                         <Spinner className="size-5" />
-                        <p className="text-sm text-zinc-400">
+                        <p className="text-sm text-muted-foreground">
                           Starting the desktop…
                         </p>
                       </>
@@ -400,7 +407,7 @@ export function DesktopPane({
           {/* The design's caption under the preview. Panel mode only — full
               screen is the whole desktop, with nothing to label. */}
           {!fullscreen && (
-            <p className="shrink-0 py-2.5 text-center text-xs text-zinc-400">
+            <p className="shrink-0 py-2.5 text-center text-xs text-muted-foreground">
               {screenLabel}
             </p>
           )}
