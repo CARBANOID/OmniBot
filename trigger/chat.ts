@@ -1,4 +1,10 @@
-import { isStepCount } from "ai"
+import {
+  isStepCount,
+  streamText as aiStreamText,
+  tool,
+  type StopCondition,
+  type ToolSet,
+} from "ai"
 import { asc, and, eq } from "drizzle-orm"
 import { chat } from "@trigger.dev/sdk/ai"
 import { z } from "zod"
@@ -47,6 +53,141 @@ function isContextOverflowError(error: unknown): boolean {
     current = current.cause as typeof current
   }
   return false
+}
+
+// Per-step time bounds, applied identically to the answering bot's model call
+// and to the target bot's handed-off call. Without these, a model that stalls
+// (a provider under "high demand" opens the stream and sends nothing) runs
+// the whole run to its maxDuration before the scaffold drops the pipe — and
+// the browser is left with a stream that ends in neither finish nor error, so
+// it spins forever. With them, a stalled call aborts on its own: the AI SDK
+// surfaces a clean error (routed through onError), so the client always
+// settles. Every bound is per-step, so a long, multi-step turn is fine; a
+// single wedged model call is not.
+const turnTimeout = {
+  // First output of a step. Generous — a reasoning model chewing on a
+  // ~200 KB screenshot can be slow — but finite, so a stall can't hide.
+  firstChunkMs: 90_000,
+  // Silence between outputs once a step has started.
+  chunkMs: 120_000,
+  // Whole step (model call + retries + local tool runs) ceiling.
+  stepMs: 300_000,
+  // One Daytona tool call — screenshots and most commands land well inside
+  // this; it bounds a wedged one.
+  toolMs: 120_000,
+}
+
+// A member bot's row as the agent needs it: identity (name, job — what it
+// is for), instructions (how it carries the job out — also its stated
+// purpose), the seed the bot's face is generated from, and its sandbox.
+// This IS the prompt: each bot is judged by these fields, so the group's
+// member list each bot sees is the others' name + job + stated purpose (a
+// bot may route a turn to a teammate on what that teammate is built to do).
+interface BotRow {
+  botId: string
+  name: string
+  job: string
+  instructions: string | null
+  avatar: string
+  sandboxId: string | null
+}
+
+// A turn that ends in a RESOLVED handoff is done. The handoff's `execute`
+// already streamed the teammate's answer into this very message, so any
+// further step would only add the answering bot's "handing this to ~ /
+// all set!" narration over a reply that is already on screen — and the
+// transcript is the example the models copy: the observed failure was a
+// bot *answering* as "That one's handed to Capra — hang tight! 🧮" after
+// reading such narration in the history. Stopping the loop right after a
+// successful handoff kills the narration and keeps the history clean.
+// A *failed* handoff (unknown member, a sub-agent hiccup) does not match:
+// the loop returns to the answering bot, which can pick another member or
+// step in itself — exactly what its error line asks of it.
+const stopAfterResolvedHandoff: StopCondition<ToolSet> = ({ steps }) => {
+  const last = steps[steps.length - 1]
+  if (!last?.content) return false
+  return last.content.some((part) => {
+    if (part.type !== "tool-result" || part.toolName !== "handoff") return false
+    const output = part.output as { ok?: unknown } | null
+    return output?.ok === true
+  })
+}
+
+// The instruction set a bot reads on a turn. Direct chats get the plain
+// single-bot framing the bot has always had; group chats add the members
+// (so the bot knows who is in the room and what each is for) and — when it
+// holds the handoff tool — how to use it. A bot receiving a handoff gets the
+// reason, framed as an instruction to take the job on.
+function buildSystemPrompt(
+  bot: BotRow,
+  roster: BotRow[],
+  options: { canHandOff?: boolean; handoffReason?: string } = {}
+): string {
+  const others = roster.filter((row) => row.botId !== bot.botId)
+  const lines: string[] = [
+    `You are ${bot.name}.`,
+    `Your job: ${bot.job}.`,
+    ...(bot.instructions?.trim()
+      ? [`Your purpose: ${bot.instructions.trim()}.`]
+      : []),
+    bot.sandboxId
+      ? `You run inside a Daytona sandbox (id: \`${bot.sandboxId}\`). This is your execution environment.`
+      : "You run inside a Daytona sandbox. This is your execution environment.",
+    "Work step by step: take an action, observe the result (a command output, a file, the screen), and adjust.",
+  ]
+
+  if (options.handoffReason) {
+    // A bot receiving a handoff is the one answering: no handoff tool is
+    // in play, so the mechanism is never MENTIONED (mentioning it is what
+    // nudges a small model to try calling it, or to narrate around it).
+    // Its history is crowded with routing chatter — "handed off to ~ —
+    // hang tight!" — and a small local model copies the style it reads,
+    // so the prompt must say the answer is the reply itself, and that the
+    // chatter is not to be imitated.
+    lines.push("")
+    lines.push("## This turn is yours — answer the user")
+    lines.push(
+      `A teammate routed this turn to you because: “${options.handoffReason}”. ` +
+        "You are the one answering — the user reads your words directly, so do the work in your own sandbox and deliver the actual answer. " +
+        "Never mention routing, handoffs, or other members in your reply, and never write lines like “handed to ~”, “hang tight”, or “a teammate will…”: you ARE the responder. " +
+        "If earlier messages contain such lines, they were routing chatter — do not copy that style or imitate it."
+    )
+    return lines.join("\n")
+  }
+
+  if (others.length > 0) {
+    lines.push("")
+    lines.push(`## Group rules — run this BEFORE you do any work`)
+    lines.push(
+      `This is a group chat of ${roster.length} bots. You are ${bot.name}.`
+    )
+    lines.push("The members, their jobs, and each one's stated purpose (so you can route to whoever is actually built for the task, not just the closest job title):")
+    for (const m of roster) {
+      const you = m.botId === bot.botId ? "  (that is you)" : ""
+      const purpose = m.instructions?.trim()
+        ? `  Purpose: “${m.instructions.trim()}”.`
+        : ""
+      lines.push(`  • ${m.name} — Job: ${m.job}.${purpose}${you}`)
+    }
+    lines.push("")
+    lines.push("Decision procedure — decide who should answer, then act on the verdict:")
+    lines.push("1. Read the user's request. Compare it against EVERY member's job AND stated purpose above, including yours. Route by what a member is actually built to do — a purpose like “write and review code” means writing code is squarely that member's lane, not just reviewing it.")
+    lines.push("2. If it clearly fits ANOTHER member's job or stated purpose better than yours: hand the turn to that member with the `handoff` tool right now — name them exactly as in the list, with one line on why they fit. Do NOT do the work yourself first; do it in their lane, not yours.")
+    lines.push("3. If it clearly fits YOUR job or stated purpose, or no member fits more clearly than you: answer the user yourself.")
+    lines.push("")
+    lines.push("Never answer a request that clearly belongs to a teammate, and never hand off a request that clearly belongs to you. When in doubt, do not hand off to someone equally or less suited — if your job is the closest match, that IS your job.")
+    lines.push("Every member has its own job and its own Daytona sandbox, so the right member can do the work directly the moment it takes the turn.")
+  }
+
+  if (options.canHandOff) {
+    lines.push("")
+    lines.push(
+      "To hand off, call the `handoff` tool with the target member's name (exactly as listed above) and a one-line reason — and say nothing to the user before or after the call: no “handing this to ~”, no confirmations, no summaries of what the teammate will do. " +
+        "When the call succeeds, your turn is over and the message ends there; the teammate's answer appears directly under the handoff, and nothing of yours may follow it."
+    )
+  }
+
+  return lines.join("\n")
 }
 
 // The chat agent behind a chat page. The session's chat id IS the app's
@@ -118,6 +259,57 @@ export const omnibotChat = chat.agent({
       return "Something went wrong while generating a response. Please try again."
     },
   },
+  // The predecessor run may have died mid-answer (a Stop click, a crash, a
+  // worker restart, a TTL expiry mid-stream). The SDK's smart default keeps
+  // that partial answer in context — but only when a follow-up user message
+  // is present, splices the interrupted question without checking whether it
+  // is already in the chain, and in the no-follow-up case drops the partial
+  // outright. All three are wrong on this app: the user SAW the partial
+  // stream, so the model must see it too, or it next answers as if that
+  // reply never happened (a "or did that last one get cut off?" greeting, or
+  // re-answering a question already in the transcript). Policy here:
+  //
+  // - the partial is ALWAYS spliced at the tail of the chain — and if the
+  //   chain already carries an earlier, less-complete capture of the same
+  //   in-flight message (a repeated recovery boot), that entry is replaced
+  //   instead of duplicated;
+  // - the interrupted question (first in-flight user) is spliced before the
+  //   partial only when its id is not already in the chain — a second
+  //   recovery boot otherwise leaves the same client message id twice;
+  // - users who arrived AFTER the interrupted question are the follow-ups
+  //   that booted this run — re-dispatch them in order, and leave the
+  //   interrupted question in the chain rather than re-asking it;
+  // - with NO follow-up (a bare retry after a crash) re-dispatch the
+  //   interrupted question itself so the interrupted turn completes instead
+  //   of stranding — the model sees question, its partial answer, and the
+  //   question again, and finishes it.
+  onRecoveryBoot: async ({
+    settledMessages,
+    inFlightUsers,
+    partialAssistant,
+  }) => {
+    if (!partialAssistant) return
+    const chain = [...settledMessages]
+    const interrupted = inFlightUsers[0]
+    if (
+      interrupted &&
+      interrupted.role === "user" &&
+      !chain.some((message) => message.id === interrupted.id)
+    ) {
+      chain.push(interrupted)
+    }
+    const tail = chain[chain.length - 1]
+    if (tail && tail.id === partialAssistant.id) {
+      chain[chain.length - 1] = partialAssistant
+    } else {
+      chain.push(partialAssistant)
+    }
+    const hasFollowUp = inFlightUsers.length > 1
+    return {
+      chain,
+      recoveredTurns: hasFollowUp ? inFlightUsers.slice(1) : inFlightUsers,
+    }
+  },
   run: async ({ chatId, messages, clientData, signal, streamText, tools }) => {
     // The UI gates sending on a selected credential, but the turn reaches
     // here without clientData if it doesn't — answer the gap, don't crash.
@@ -152,8 +344,16 @@ export const omnibotChat = chat.agent({
     // describe — name, job (what the bot is for), and instructions (how it
     // should carry the job out).
     const members = await db
-      .select({ botId: chatMembers.botId })
+      .select({
+        botId: chatMembers.botId,
+        name: bots.name,
+        job: bots.job,
+        instructions: bots.instructions,
+        avatar: bots.avatar,
+        sandboxId: bots.sandboxId,
+      })
       .from(chatMembers)
+      .innerJoin(bots, eq(chatMembers.botId, bots.id))
       .where(eq(chatMembers.chatId, chatId))
       .orderBy(asc(chatMembers.joinedAt))
     if (members.length === 0) {
@@ -166,20 +366,12 @@ export const omnibotChat = chat.agent({
       }
       targetBotId = clientData.botId
     }
-    const [bot] = await db
-      .select({
-        name: bots.name,
-        avatar: bots.avatar,
-        job: bots.job,
-        instructions: bots.instructions,
-        sandboxId: bots.sandboxId,
-      })
-      .from(bots)
-      .where(eq(bots.id, targetBotId))
-      .limit(1)
-    if (!bot) {
-      throw new Error("No bot is set up for this chat.")
-    }
+    const bot =
+      members.find((member) => member.botId === targetBotId) ?? members[0]
+    // A group chat has two or more members — the only shape where a bot can
+    // hand the turn to a different one, and the only shape that carries the
+    // handoff tool. A direct chat is a single member with no one to hand to.
+    const isGroup = members.length >= 2
 
     // The transcript must remember WHICH bot said what: a group chat is
     // answered by whichever member the composer picked for the turn, and even
@@ -234,58 +426,241 @@ export const omnibotChat = chat.agent({
     // `tools` function above), and the signal is what makes Stop abort the
     // model call server-side.
     //
-    // The system prompt is per-bot — each chat maps to exactly one bot, and the
-    // bot's row IS the identity: name, job (what it's for), purpose (how it
-    // should carry the job out), and the Daytona sandbox it runs in. When
-    // the sandbox hasn't been created yet (or was left over from a failed
-    // create), we still describe the environment in generic terms; the tools
-    // create or recover it on demand.
-    const system = [
-      `You are ${bot.name}.`,
-      `Your job: ${bot.job}.`,
-      ...(bot.instructions?.trim()
-        ? [`Your purpose: ${bot.instructions.trim()}.`]
-        : []),
-      bot.sandboxId
-        ? `You run inside a Daytona sandbox (id: \`${bot.sandboxId}\`). This is your execution environment.`
-        : "You run inside a Daytona sandbox. This is your execution environment.",
-      "Work step by step: take an action, observe the result (a command output, a file, the screen), and adjust.",
-    ].join("\n")
+    // The system prompt is built once per bot from its row (name, job,
+    // purpose, sandbox) plus — for a group — the member roster (so the bot
+    // knows who is in the room and what each is for) and, on the answering
+    // bot only, how to use the handoff tool.
+    const makeModel = () => provider.createProvider(key)(modelId)
+    const system = buildSystemPrompt(bot, members, { canHandOff: isGroup })
+
+    // The group-only handoff tool, built here rather than in the agent's
+    // `tools` function because the answering bot's identity and the
+    // conversation it is handing off to are only known in the run. Its
+    // `execute` starts a fully separate model call for the target bot —
+    // same provider and model, but that bot's own identity, sandbox tools,
+    // and the same conversation — and streams the answer back into this
+    // turn (as the parent's tool result) via `chat.forwardSubAgent`. The
+    // target gets no handoff tool of its own, so the hand cannot bounce
+    // between members.
+    let toolsForTurn: ToolSet = tools
+    if (isGroup) {
+      toolsForTurn = {
+        ...tools,
+        handoff: tool({
+          description:
+            "Hand the turn to a more suitable teammate in this group chat. " +
+            "Use it only when the user's request fits another member's job clearly " +
+            "better than yours — name that member (use their name from the member " +
+            "list), and say in one line why. After you hand off, that teammate " +
+            "takes the turn; do not keep working.",
+          inputSchema: z.object({
+            targetName: z
+              .string()
+              .min(1)
+              .describe(
+                "The name of a different member bot in this chat to hand the turn " +
+                  "to, exactly as shown in the member list above (e.g. \"Capra\")."
+              ),
+            reason: z
+              .string()
+              .min(1)
+              .describe("One short sentence on why that member is the better fit."),
+          }),
+          execute: async ({ targetName, reason }, { toolCallId, abortSignal }) => {
+            // Validate the target against the actual members of THIS chat: a
+            // handoff to a bot outside the room is rejected in words so the
+            // answering bot can choose someone else (or step in itself).
+            //
+            // The model is told to name the member (the member list in the
+            // system prompt shows names, not ids), so resolve by name —
+            // case-insensitively, trimmed. We also accept a raw bot id in
+            // case a model echoes one, which keeps things robust.
+            const wanted = targetName.trim()
+            const norm = (s: string) => s.trim().toLowerCase()
+            const target = members.find(
+              (member) =>
+                norm(member.name) === norm(wanted) || member.botId === wanted
+            )
+            if (!target) {
+              const otherNames = members
+                .filter((member) => member.botId !== bot.botId)
+                .map((member) => member.name)
+                .join(", ")
+              return {
+                ok: false,
+                error: `There is no such teammate as "${targetName}". The other members in this chat are: ${otherNames}. Hand the turn to one of them by name, or answer the user yourself.`,
+              }
+            }
+            if (target.botId === bot.botId) {
+              return {
+                ok: false,
+                error:
+                  "That is you — you cannot hand off to yourself. Answer the user's request directly.",
+              }
+            }
+            // The target bot answers the same conversation with its own
+            // identity and sandbox. Bot A's turn already stamped the parent
+            // message with its own face; the sub-agent reply is rendered
+            // under the handoff with the TARGET's face and name (the client
+            // looks the target bot up in the group member list).
+            const targetSystem = buildSystemPrompt(target, members, {
+              handoffReason: reason,
+            })
+            const targetTools = buildComputerUseTools(chatId, target.botId)
+            const sub = aiStreamText({
+              model: makeModel(),
+              system: targetSystem,
+              messages,
+              tools: targetTools,
+              stopWhen: isStepCount(40),
+              abortSignal,
+              timeout: turnTimeout,
+              maxRetries: 3,
+              providerOptions: { openaiCompatible: { keep_alive: "1h" } },
+            })
+            // Stream the target bot's reply through this tool call: its
+            // chunks ride `data-subagent` (transient) to the browser while it
+            // runs, and forwardSubAgent resolves with the final message. We
+            // persist that final message's parts as the tool's OUTPUT (a
+            // concrete, JSON-friendly record — not the generic UIMessage,
+            // which would defeat the tool()'s output-type inference), so the
+            // handoff answer still renders after a reload.
+            //
+            // A sub-agent stream that ERRORS (a wedged/`no user query` local
+            // model, a 5xx, context overflow) rejects here; one that ends
+            // EMPTY resolves `undefined`. Neither may be swallowed silently —
+            // capture the real reason, log it, and hand the answering bot a
+            // line it can act on, so the client shows WHY not "not available".
+            // The reply is recovered on two layers so a server-side hiccup
+            // (a wedged local model, an overflowed context, a failed managed
+            // stream) never leaves the user with a dead-end. Layer 1 is
+            // forwardSubAgent's final message (its reducer); layer 2 is the
+            // sub result's own text, which is proven to resolve even after the
+            // UI stream is consumed, and is used when the message comes back
+            // empty or the call throws.
+            let forwarded
+            let forwardError: unknown
+            try {
+              forwarded = await chat.forwardSubAgent(
+                sub.toUIMessageStream(),
+                { toolCallId },
+              )
+            } catch (error) {
+              forwardError = error
+              console.error(
+                "[omnibot-chat] handoff sub-agent errored:",
+                error,
+              )
+            }
+
+            // Prefer the forwarded message's parts; fall back to the sub
+            // result's accumulated text (wrapping it as a single text part).
+            let parts: Array<Record<string, unknown>> = []
+            const forwardedParts =
+              forwarded && Array.isArray(forwarded.parts) ? forwarded.parts : []
+            if (forwardedParts.length > 0) {
+              parts = forwardedParts as unknown as Array<Record<string, unknown>>
+            } else {
+              let text = ""
+              try {
+                text = await sub.text
+              } catch {
+                text = ""
+              }
+              if (text && text.trim()) {
+                console.warn(
+                  "[omnibot-chat] forwardSubAgent gave no parts; recovered " +
+                    "the reply via the sub-agent's own text",
+                )
+                parts = [{ type: "text", text }]
+              }
+            }
+
+            if (parts.length === 0) {
+              const detail =
+                forwardError instanceof Error
+                  ? forwardError.message
+                  : typeof forwardError === "string"
+                    ? forwardError
+                    : ""
+              console.error(
+                "[omnibot-chat] handoff sub-agent produced no reply",
+                detail,
+              )
+              return {
+                ok: false,
+                error:
+                  `The teammate could not produce an answer just now${
+                    detail ? ` (${detail})` : ""
+                  }. Answer the user yourself, or ask to try again.`,
+              }
+            }
+
+            return {
+              ok: true,
+              targetBotId: target.botId,
+              targetName: target.name,
+              parts,
+            }
+          },
+          toModelOutput: ({ output }) => {
+            // The tool OUTPUT is a plain record — either the rejection
+            // ({ ok: false, error }) or the target bot's reply
+            // ({ ok: true, parts }). Hand the model the last text part of the
+            // reply (not the tool parts or image bytes), so later turns
+            // re-read the handoff as a clean answer, not a JSON blob.
+            const record = output as
+              | { ok: false; error: string }
+              | {
+                  ok: true
+                  targetBotId: string
+                  targetName: string
+                  parts: Array<{ type: string; text?: string }>
+                }
+            // Narrow on the `ok` discriminator so `.parts` is only read on the
+            // success branch (the rejection has no `parts`).
+            if (record.ok !== true) {
+              const errorText =
+                record.ok === false && typeof record.error === "string"
+                  ? record.error
+                  : "The handoff to a teammate could not be completed."
+              // `error-text` carries a plain string, not an object.
+              return { type: "error-text", value: errorText }
+            }
+            const lastText = (record.parts ?? [])
+              .filter((part) => part.type === "text" && typeof part.text === "string")
+              .map((part) => part.text as string)
+              .slice(-1)
+              .join("\n")
+            return { type: "text", value: lastText || "The turn was handed off to a teammate." }
+          },
+        }),
+      }
+    }
 
     return streamText({
-      model: provider.createProvider(key)(modelId),
+      model: makeModel(),
       system,
       messages,
-      tools,
+      tools: toolsForTurn,
       // The AI SDK caps the tool loop at ONE step by default — one model
       // call, its tools run, and over. Desktop work needs many
       // act-observe-act round trips, so the limit is lifted explicitly. 50
       // model calls (each running its own tool batch) is the runway for a
       // turn; the model simply stops calling tools when the job is done.
-      stopWhen: isStepCount(50),
+      //
+      // In a group chat a resolved handoff ends the turn too — the
+      // teammate's answer already landed inside this message, so there is
+      // nothing left for the answering bot to say (see
+      // stopAfterResolvedHandoff). In a direct chat there is no handoff
+      // tool, so the cap alone governs.
+      stopWhen: isGroup
+        ? [isStepCount(50), stopAfterResolvedHandoff]
+        : isStepCount(50),
       abortSignal: signal,
-      // Bounded per-request time. Without these, a model that stalls (a
-      // provider under "high demand" opens the stream and sends nothing) runs
-      // the whole run to its maxDuration before the scaffold drops the pipe —
-      // and the browser is left with a stream that ends in neither finish nor
-      // error, so it spins forever. With them, a stalled call aborts on its
-      // own: the AI SDK surfaces a clean error (routed through onError above),
-      // so the client always settles. Every bound is per-step, so a long,
-      // multi-step turn is fine; a single wedged model call is not.
-      timeout: {
-        // First output of a step. Generous — a reasoning model chewing on a
-        // ~200 KB screenshot can be slow — but finite, so a stall can't hide.
-        firstChunkMs: 90_000,
-        // Silence between outputs once a step has started.
-        chunkMs: 120_000,
-        // Whole step (model call + retries + local tool runs) ceiling.
-        stepMs: 300_000,
-        // One Daytona tool call — screenshots and most commands land well
-        // inside this; it bounds a wedged one.
-        toolMs: 120_000,
-      },
+      timeout: turnTimeout,
       // A few attempts over a transient "high demand" 503 before we give up.
-      // Each 503 is fast; the timeouts above cap how long the set can run.
+      // Each 503 is fast; the timeout above caps how long the set can run.
       maxRetries: 3,
       // Provider-specific body fields. The `openaiCompatible` key is read
       // only by the one provider in the registry that uses

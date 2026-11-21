@@ -1,6 +1,6 @@
 "use client"
 
-import type { UIDataTypes, UIMessagePart, UITools } from "ai"
+import type { UIDataTypes, UIMessage, UIMessagePart, UITools } from "ai"
 import {
   BanIcon,
   CheckIcon,
@@ -21,6 +21,8 @@ import {
 import type { LucideIcon } from "lucide-react"
 import { useState } from "react"
 
+import { MessageResponse } from "@/components/ai-elements/message"
+import { ChatAvatar } from "@/components/chat-avatar"
 import { Button } from "@/components/ui/button"
 import {
   Collapsible,
@@ -28,6 +30,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { Spinner } from "@/components/ui/spinner"
+import type { ChatMemberInfo } from "@/queries/chat"
 import { cn } from "@/lib/utils"
 
 // ---------------------------------------------------------------------------
@@ -482,5 +485,137 @@ export function ChatReasoningPart({
         </div>
       </CollapsibleContent>
     </Collapsible>
+  )
+}
+
+/**
+ * A group-chat handoff: the answering bot delegated the turn to a teammate.
+ * It is a tool call, but what matters is the *teammate's* reply — so render
+ * that teammate's face, name, the one-line reason, and their full answer
+ * (text, reasoning, tool calls). Group-only; a direct chat never emits it.
+ *
+ * The reply streams in live while the tool call is in flight and is rebuilt
+ * from `data-subagent` chunks (`subAgentGet`, keyed by the parent
+ * toolCallId). After a reload those transient chunks are gone, so the same
+ * reply is read from the persisted tool output (the sub-agent's parts the
+ * agent captured on the server).
+ */
+export function HandoffPart({
+  part,
+  members,
+  subAgentGet,
+  isGenerating,
+  className,
+}: {
+  part: Part
+  members?: ChatMemberInfo[] | null
+  subAgentGet?: (toolCallId: string) => UIMessage | undefined
+  isGenerating?: boolean
+  className?: string
+}) {
+  const inv = asInvocation(part)
+  const input = asRecord(inv.input)
+  const outputRecord = asRecord(inv.output)
+  const reason =
+    typeof input.reason === "string" && input.reason.length > 0
+      ? input.reason
+      : undefined
+
+  // Who is answering now: the model names the teammate (the member list in
+  // the system prompt shows names, not ids), and the server persists the
+  // resolved bot id on the tool OUTPUT as a robust fallback for finding
+  // that member's face and name. A raw id must never render as a NAME —
+  // if the member can't be resolved, "a teammate" is the floor.
+  const nameHint =
+    typeof input.targetName === "string" && input.targetName.length > 0
+      ? input.targetName
+      : undefined
+  const idHint =
+    typeof outputRecord.targetBotId === "string" &&
+    outputRecord.targetBotId.length > 0
+      ? outputRecord.targetBotId
+      : undefined
+  const norm = (s: string) => s.trim().toLowerCase()
+  const target =
+    members?.find((member) => idHint != null && member.id === idHint) ??
+    members?.find(
+      (member) => nameHint != null && norm(member.name) === norm(nameHint)
+    )
+  const name = target?.name ?? nameHint ?? "a teammate"
+  const avatar = target?.avatar
+
+  // The teammate's reply: prefer the live stream (in flight now), and fall
+  // back to the parts the agent persisted on the server (a reload).
+  // A handoff is a tool part, so it always carries the parent toolCallId —
+  // the key the live reply is stored under. (Not on every Part variant.)
+  const toolCallId = (part as { toolCallId: string }).toolCallId
+  const live =
+    typeof subAgentGet === "function" ? subAgentGet(toolCallId) : undefined
+  const liveParts: Part[] | null =
+    live && Array.isArray(live.parts) ? (live.parts as Part[]) : null
+  const outputParts: Part[] | null = Array.isArray(outputRecord.parts)
+    ? (outputRecord.parts as Part[])
+    : null
+  const replyParts = liveParts ?? outputParts
+
+  // When the teammate could not answer, explain why — do not fall back to a
+  // generic dead-end. Two shapes carry the reason: the tool call errored
+  // (state `output-error`, `errorText`) or it resolved to a rejection
+  // (`{ ok: false, error }`).
+  const error =
+    typeof inv.errorText === "string" && inv.errorText.length > 0
+      ? inv.errorText
+      : outputRecord.ok === false && typeof outputRecord.error === "string"
+        ? outputRecord.error
+        : undefined
+
+  // Nothing yet: the tool call is in flight and its reply has not streamed —
+  // an errored handoff is not pending, so it never shows "answering…".
+  const pending = replyParts === null && error === undefined
+
+  return (
+    <div className={cn("space-y-2 rounded-md border bg-muted/30 p-3", className)}>
+      <div className="flex items-center gap-1.5 text-sm">
+        {avatar ? (
+          <ChatAvatar animated className="size-5 shrink-0" seed={avatar} />
+        ) : null}
+        <span className="font-medium">{name}</span>
+        <span className="min-w-0 truncate text-xs text-muted-foreground">
+          · {reason ?? "hands off the turn"}
+        </span>
+        {pending && isGenerating ? (
+          <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+            <Spinner className="size-3.5" />
+            answering…
+          </span>
+        ) : null}
+      </div>
+      {replyParts !== null && replyParts.length > 0 ? (
+        replyParts.map((subPart, i) => {
+          const type = subPart.type
+          const sub = subPart as { text?: unknown }
+          if (type === "text" && typeof sub.text === "string") {
+            return <MessageResponse key={i}>{sub.text}</MessageResponse>
+          }
+          if (type === "reasoning" && typeof sub.text === "string") {
+            return <ChatReasoningPart key={i} text={sub.text} />
+          }
+          if (typeof type === "string" && type.startsWith("tool-")) {
+            return <ChatToolPart key={i} part={subPart} />
+          }
+          return null
+        })
+      ) : null}
+      {error ? (
+        <p className="flex items-start gap-1.5 text-xs text-destructive">
+          <XIcon className="mt-px size-3.5 shrink-0" />
+          <span>{error}</span>
+        </p>
+      ) : pending && !isGenerating ? (
+        <p className="text-xs text-muted-foreground">
+          The teammate’s reply is not available.
+        </p>
+      ) : null}
+    </div>
   )
 }

@@ -130,12 +130,20 @@ export default async function ChatPage({
 
 // Server component inside the page's Suspense boundary: reads the
 // transcript server-side (the boundary's spinner shows while it is in
-// flight), then seeds <Chat> with it. A failed read passes null and the
-// client hook in components/chat.tsx retries with its own spinner. Props
-// are <Chat>'s minus the one this function supplies.
-async function ChatWithTranscript(props: Omit<ChatProps, "initialMessages">) {
+// flight), then seeds <Chat> with it — messages and the resume cursor from
+// the same read, so the transport opens its live stream exactly where the
+// persisted history ends. A failed read passes null and the client hook in
+// components/chat.tsx retries with its own spinner (the hook then seeds the
+// cursor itself). Props are <Chat>'s minus the two this function supplies.
+async function ChatWithTranscript(
+  props: Omit<ChatProps, "initialMessages" | "initialCursor">,
+) {
   const transcript = await getChatTranscript(props.chatId)
   return (
-    <Chat {...props} initialMessages={transcript ? transcript.messages : null} />
+    <Chat
+      {...props}
+      initialMessages={transcript ? transcript.messages : null}
+      initialCursor={transcript?.cursors?.lastOutEventId ?? null}
+    />
   )
 }

@@ -2,7 +2,9 @@
 
 import { useChat } from "@ai-sdk/react"
 import {
+  seedTranscriptCursor,
   useLoadTranscript,
+  useSubAgentMessages,
   useTriggerChatTransport,
 } from "@trigger.dev/sdk/chat/react"
 import type { UIMessage } from "ai"
@@ -34,7 +36,11 @@ import {
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { BotPicker } from "@/components/bot-picker"
 import { ChatAvatar } from "@/components/chat-avatar"
-import { ChatReasoningPart, ChatToolPart } from "@/components/chat-tools"
+import {
+  ChatReasoningPart,
+  ChatToolPart,
+  HandoffPart,
+} from "@/components/chat-tools"
 import { GroupChatAvatar } from "@/components/group-chat-avatar"
 import { CredentialEditButton } from "@/components/credentials/credential-edit-button"
 import { CredentialPicker } from "@/components/credentials/credential-picker"
@@ -88,6 +94,13 @@ export interface ChatProps {
   // render; null means the prefetch failed and the client-side
   // `useLoadTranscript` hook falls back to its own load + spinner.
   initialMessages?: UIMessage[] | null
+  // The transcript's `.out` resume cursor (`cursors.lastOutEventId`), captured
+  // by the page from the same SSR read that produced `initialMessages`. Seeds
+  // the transport's resume position on the SSR path so a `resume` opens the
+  // live stream just past the persisted history instead of replaying it —
+  // without it the first message after a refresh re-emits the last assistant
+  // reply (a duplicate). Absent for a brand-new chat / a failed prefetch.
+  initialCursor?: string | null
 }
 
 export function Chat({
@@ -101,6 +114,7 @@ export function Chat({
   initialActiveProviderId,
   initialModelId,
   initialMessages,
+  initialCursor,
 }: ChatProps) {
   const isGroup = kind === "group"
   return (
@@ -116,6 +130,7 @@ export function Chat({
         members={isGroup ? (members ?? []) : null}
         initialModelId={initialModelId}
         initialMessages={initialMessages}
+        initialCursor={initialCursor}
       />
     </CredentialsProvider>
   )
@@ -137,10 +152,16 @@ function respondingBotOf(message: UIMessage): RespondingBot | undefined {
   if (
     typeof data === "object" &&
     data !== null &&
+    typeof (data as { name?: unknown }).name === "string" &&
     typeof (data as { avatar?: unknown }).avatar === "string"
   ) {
-    const bot = data as { name?: string; avatar: string }
-    return { name: bot.name ?? bot.avatar, avatar: bot.avatar }
+    const bot = data as { name: string; avatar: string }
+    // Both fields must be real display values. The previous fallback
+    // (`name ?? avatar`) would print the avatar seed — a 21-character
+    // nanoid — as the bot's name whenever `name` was absent; hiding the
+    // identity row is strictly better than showing the seed.
+    if (bot.name.trim() === "" || bot.avatar.trim() === "") return undefined
+    return { name: bot.name, avatar: bot.avatar }
   }
   return undefined
 }
@@ -165,6 +186,8 @@ function ChatGate({
   // Prefetched by the page during SSR; null when the prefetch failed. See
   // ChatProps.initialMessages.
   initialMessages = null,
+  // See ChatProps.initialCursor.
+  initialCursor = null,
 }: {
   chatId: string
   name?: string | null
@@ -172,6 +195,7 @@ function ChatGate({
   members?: ChatMemberInfo[] | null
   initialModelId?: string | null
   initialMessages?: UIMessage[] | null
+  initialCursor?: string | null
 }) {
   // Which member bot answers (group chats) — the picker's state, live. A
   // direct chat has exactly one member, which the agent resolves, so this
@@ -220,6 +244,22 @@ function ChatGate({
       startChatSession({ chatId, clientData }),
     clientData,
   })
+
+  // The SSR path seeds the transcript straight into <Chat> (no client load),
+  // so it skips the cursor seeding `useLoadTranscript` performs on the
+  // fallback path. Without it, ChatConversation's `useChat` resume-reconnects
+  // the live ".out" stream from the START of the persisted history rather
+  // than just past it — and the first message after a refresh re-emits the
+  // last assistant reply (the duplicate we want to kill). Seed the same
+  // cursor so both entry points open the stream past the history. No-op when
+  // the transcript carried no cursor (brand-new / empty chat).
+  useEffect(() => {
+    if (initialMessages) {
+      seedTranscriptCursor(transport, chatId, {
+        lastOutEventId: initialCursor ?? undefined,
+      })
+    }
+  }, [initialMessages, initialCursor, transport, chatId])
 
   // The page prefetched the transcript during SSR — it is in the initial
   // HTML, and a chatId cannot change while this page is mounted (it is the
@@ -324,6 +364,30 @@ function ChatFallback({
   )
 }
 
+// Three fading "the bot is working" typing dots — shown while a turn is
+// live but the model has not produced any output yet (worker pickup,
+// routing, model latency: the silence before the first token). Pure opacity
+// (no spatial motion), staggered by delay into the classic ● ● ● wave, and
+// therefore it survives the reduced-motion block in globals.css, which
+// strips spatial animation but preserves opacity.
+function TypingDots() {
+  return (
+    <span
+      role="status"
+      aria-label="The bot is typing"
+      className="flex items-center gap-0.5"
+    >
+      {[0, 1, 2].map((dot) => (
+        <span
+          key={dot}
+          className="size-1 animate-typing rounded-full bg-muted-foreground"
+          style={{ animationDelay: `${dot * 0.2}s` }}
+        />
+      ))}
+    </span>
+  )
+}
+
 function ChatConversation({
   chatId,
   name,
@@ -354,6 +418,12 @@ function ChatConversation({
   const activeBot = isGroup
     ? members?.find((member) => member.id === botId) ?? members?.[0]
     : undefined
+  // Live sub-agent replies (the group's handoff target answering on a
+  // parent tool call) are streamed as transient `data-subagent` chunks and
+  // rebuilt here, keyed by the parent's toolCallId. Group-only — a direct
+  // chat has no handoff, so this is simply unused there.
+  const subAgents = useSubAgentMessages()
+
   // `resume` reconnects to an in-flight stream after a mid-answer refresh
   // (the transport replays from the loaded transcript's cursor); with an
   // empty transcript there is nothing to reconnect to yet.
@@ -368,6 +438,9 @@ function ChatConversation({
     transport,
     messages: initialMessages,
     resume: initialMessages.length > 0,
+    // Feed every data chunk to the sub-agent builder so handoff replies
+    // render live while their tool call is still in flight.
+    onData: subAgents.onData,
   })
 
   // `useChat`'s `messages` array can momentarily contain the same logical
@@ -399,6 +472,38 @@ function ChatConversation({
   const ready = provider != null && (isKeyless || credential != null)
 
   const isGenerating = status === "submitted" || status === "streaming"
+
+  // ── The "bot is working" typing indicator ─────────────────────────────────
+  // A turn can be live (submitted/streaming) long before the model emits
+  // anything. During that silence the bot's identity shows TypingDots. Two
+  // shapes:
+  //  - the assistant's message has arrived but carries no visible output
+  //    yet (no non-empty text, no reasoning, no tool activity) — dots in
+  //    its identity row;
+  //  - it has not arrived at all — a fresh identity row after the user's
+  //    last message, identifying the addressed bot (the picked member in a
+  //    group, the single bot in a direct chat).
+  // Reasoning and tool parts count as output — their rows already carry
+  // working indicators (Thinking… / answering…), so the dots stand down.
+  const hasVisibleOutput = (message: UIMessage): boolean =>
+    message.parts.some((part) => {
+      if (part.type === "text") return part.text.trim().length > 0
+      if (part.type === "reasoning") return true
+      if (part.type.startsWith("tool-")) return true
+      return false
+    })
+
+  const lastMessage = uniqueMessages[uniqueMessages.length - 1]
+  const lastMessageTyping =
+    isGenerating &&
+    lastMessage != null &&
+    lastMessage.role !== "user" &&
+    !hasVisibleOutput(lastMessage)
+  const pendingFirstToken =
+    isGenerating && (lastMessage == null || lastMessage.role === "user")
+  const typingBot = (isGroup ? activeBot : bot) as
+    | ({ name?: string; avatar?: string } | null)
+    | undefined
 
   // Stop must reach the run: aiStop() settles the local subscription, and
   // stopGeneration tells the worker to abort the in-flight streamText —
@@ -451,7 +556,8 @@ function ChatConversation({
               }
             />
           ) : (
-            uniqueMessages.map((message) => {
+            <>
+              {uniqueMessages.map((message) => {
               // The answering bot sits above its answer — the stamp the agent
               // wrote into the message (`data-group-bot`). In a group chat this
               // is the picked member, so you can tell who replied; in a direct
@@ -471,6 +577,7 @@ function ChatConversation({
                       <span className="text-xs font-medium">
                         {responder.name}
                       </span>
+                      {lastMessageTyping && <TypingDots />}
                     </div>
                   )}
                   <MessageContent>
@@ -492,6 +599,17 @@ function ChatConversation({
                         }
                         text={part.text}
                       />
+                    ) : part.type === "tool-handoff" ? (
+                      // A handoff is a tool call, but its content is the
+                      // delegated bot's reply — render the target's face,
+                      // name and their answer, not the generic tool row.
+                      <HandoffPart
+                        key={`${message.id}-${i}`}
+                        part={part}
+                        members={members}
+                        subAgentGet={subAgents.get}
+                        isGenerating={isGenerating}
+                      />
                     ) : part.type.startsWith("tool-") ? (
                       <ChatToolPart key={`${message.id}-${i}`} part={part} />
                     ) : null
@@ -499,7 +617,27 @@ function ChatConversation({
                 </MessageContent>
               </Message>
               );
-            })
+              })}
+
+              {/* A turn is in flight but no output has arrived at all yet
+                  (the assistant's message hasn't even started streaming):
+                  a fresh identity row announces the addressed bot — the
+                  picked member in a group, the single bot in a direct chat. */}
+              {pendingFirstToken && typingBot?.avatar ? (
+                <div className="flex items-center gap-1.5">
+                  <ChatAvatar
+                    className="size-6 shrink-0"
+                    seed={typingBot.avatar}
+                  />
+                  {typingBot.name ? (
+                    <span className="text-xs font-medium">
+                      {typingBot.name}
+                    </span>
+                  ) : null}
+                  <TypingDots />
+                </div>
+              ) : null}
+            </>
           )}
         </ConversationContent>
         {/* Needs to live inside <Conversation>: reads its scroll context. */}

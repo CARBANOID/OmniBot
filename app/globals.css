@@ -48,6 +48,26 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Three-dot "typing" indicator in the bot's identity row (components/chat.tsx):
+   a pure opacity fade rather than spatial motion, because the reduced-motion
+   block further down strips spatial animation but preserves opacity — and a
+   "the bot is still working" signal is exactly what should survive it. */
+@theme {
+    --animate-typing: typing 1.2s ease-in-out infinite backwards;
+
+    @keyframes typing {
+        0%,
+        70%,
+        100% {
+            opacity: 0.25;
+        }
+
+        35% {
+            opacity: 1;
+        }
+    }
+}
+
 :root {
     color-scheme: light;
     --background: oklch(1 0 0);
