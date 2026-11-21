@@ -99,6 +99,46 @@ export function DesktopPane({
   // Guards the lazy first mint so a quick close/reopen while the first mint is
   // in flight doesn't fire a second one.
   const mintInFlightRef = useRef(false)
+  // The pending "refreshing" toast of the manual Refresh it belongs to: its
+  // id, tagged with the session generation it was promised for. The Refresh's
+  // visible change — the NEW session's stream, live — doesn't exist until
+  // that session's RFB `connect` event lands (lifting the "Starting…"
+  // overlay), so the toast stays a loading sign until then and flips to
+  // success only after that lands on screen. The same session's drop, a
+  // credentials demand, or its teardown (unmount / a newer Refresh) clears
+  // it instead — whichever actually happens. The tag is what lets a newer
+  // Refresh's toast survive the older session's teardown events, while a
+  // stale toast can never outlive its session.
+  const refreshToastRef = useRef<{ id: string; session: number } | null>(null)
+
+  // Flip the pending toast to success — for that session only. The connect
+  // event that called this has lifted the "Starting…" overlay; straddle a
+  // paint so the desktop is genuinely on screen before the success shows.
+  const completeRefreshToast = useCallback((sessionNumber: number) => {
+    const pending = refreshToastRef.current
+    if (!pending || pending.session !== sessionNumber) return
+    refreshToastRef.current = null
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        toast.update(pending.id, {
+          type: "success",
+          title: "Desktop refreshed",
+          description: "Reconnected to a fresh sandbox session.",
+          timeout: 4000,
+        })
+      })
+    )
+  }, [])
+
+  // A session failed or was torn down: its pending toast can never complete,
+  // so close it (the inline "lost" state / error toast already carries the
+  // real news). Again, for that session only.
+  const clearRefreshToast = useCallback((sessionNumber: number) => {
+    const pending = refreshToastRef.current
+    if (!pending || pending.session !== sessionNumber) return
+    refreshToastRef.current = null
+    toast.close(pending.id)
+  }, [])
 
   // The RFB WebSocket target, from the minted base URL: same host (which
   // carries the signed token), the noVNC websockify path, over TLS.
@@ -166,15 +206,28 @@ export function DesktopPane({
     const firstLoad = url === null
     setPhase("connecting")
     setUrl(result.url)
-    setSession((n) => n + 1)
+    const nextSession = session + 1
+    setSession(nextSession)
     if (!firstLoad) {
-      toast.add({
-        type: "success",
-        title: "Desktop refreshed",
-        description: "Reconnected to a fresh sandbox session.",
+      // A pending "refreshing" toast can still be out there for the session
+      // we are about to tear down — settle it here rather than letting its
+      // teardown clear a toast we're about to replace.
+      if (refreshToastRef.current) {
+        toast.close(refreshToastRef.current.id)
+        refreshToastRef.current = null
+      }
+      // Then promise the new one: its session's own connect event is what
+      // will flip it (completeRefreshToast), so no success claim outlives
+      // the moment the desktop is actually live again.
+      const pending = toast.add({
+        type: "loading",
+        title: "Refreshing the desktop",
+        description: "Reconnecting to a fresh sandbox session…",
+        timeout: 0,
       })
+      refreshToastRef.current = { id: pending, session: nextSession }
     }
-  }, [chatId, minting, url])
+  }, [chatId, minting, session, url])
 
   // (Re)establish the self-hosted RFB session against `wsUrl`, reusing the
   // persistent container. Runs client-side only (the bundle is dynamic-imported
@@ -224,7 +277,9 @@ export function DesktopPane({
       if (screen) (screen as HTMLElement).style.overflow = "hidden"
 
       rfb.addEventListener("connect", () => {
-        if (!tornDown) setPhase("live")
+        if (tornDown) return
+        setPhase("live")
+        completeRefreshToast(session)
       })
       rfb.addEventListener("disconnect", (e) => {
         if (tornDown) return
@@ -232,12 +287,14 @@ export function DesktopPane({
         // gone from the user's view, so fall back to the "lost" state.
         const detail = (e as CustomEvent<RFBDisconnectDetail>).detail
         void detail
+        clearRefreshToast(session)
         setPhase("lost")
       })
       rfb.addEventListener("credentialsrequired", () => {
         if (tornDown) return
         // Daytona's VNC is NoAuth behind the signed proxy; if it ever asks for
         // a password we can't have, fail loudly instead of hanging.
+        clearRefreshToast(session)
         setPhase("lost")
         toast.add({
           type: "error",
@@ -250,12 +307,15 @@ export function DesktopPane({
 
     return () => {
       tornDown = true
+      // Teardown (a refresh or unmount): this session's pending toast, if
+      // one is still ours, can never complete — settle it here.
+      clearRefreshToast(session)
       if (instance) {
         instance.disconnect()
         if (rfbRef.current === instance) rfbRef.current = null
       }
     }
-  }, [wsUrl, session])
+  }, [wsUrl, session, clearRefreshToast, completeRefreshToast])
 
   // The caption under the preview, verbatim of the design ("Quill's screen").
   const screenLabel = botName ? `${botName}'s screen` : "Bot screen"

@@ -11,6 +11,7 @@ import { z } from "zod"
 
 import { decryptCredential } from "@/lib/crypto"
 import { db } from "@/lib/db"
+import { readBotMemory } from "@/lib/daytona"
 import { bots, chatMembers, chats, credentials } from "@/lib/db/schema"
 import { providers } from "@/providers"
 
@@ -113,6 +114,36 @@ const stopAfterResolvedHandoff: StopCondition<ToolSet> = ({ steps }) => {
   })
 }
 
+// Both group tools take a teammate NAME (the prompts show names, not ids),
+// and both must reject a miss with the same actionable words — here's who is
+// actually in the room — so the small model can retry or fall back correctly.
+// One helper, one shape: a hit (the member row) or a miss (the error line).
+function resolveMember(
+  members: BotRow[],
+  selfBotId: string,
+  wanted: string
+):
+  | { kind: "found"; target: BotRow }
+  | { kind: "missing"; error: string } {
+  const wantedTrimmed = wanted.trim()
+  const norm = (s: string) => s.trim().toLowerCase()
+  const target = members.find(
+    (member) =>
+      norm(member.name) === norm(wantedTrimmed) || member.botId === wantedTrimmed
+  )
+  if (!target) {
+    const otherNames = members
+      .filter((member) => member.botId !== selfBotId)
+      .map((member) => member.name)
+      .join(", ")
+    return {
+      kind: "missing",
+      error: `There is no such teammate as "${wanted}". The other members of this chat are: ${otherNames}.`,
+    }
+  }
+  return { kind: "found", target }
+}
+
 // The instruction set a bot reads on a turn. Direct chats get the plain
 // single-bot framing the bot has always had; group chats add the members
 // (so the bot knows who is in the room and what each is for) and — when it
@@ -121,7 +152,15 @@ const stopAfterResolvedHandoff: StopCondition<ToolSet> = ({ steps }) => {
 function buildSystemPrompt(
   bot: BotRow,
   roster: BotRow[],
-  options: { canHandOff?: boolean; handoffReason?: string } = {}
+  options: {
+    canHandOff?: boolean
+    handoffReason?: string
+    memoryQuery?: string
+    // Group recall: the OTHER members' private notes (their MEMORY.md, read
+    // at turn start), presented as this bot's own long-term memory of what
+    // the user shared with the team privately.
+    teammateMemory?: Array<{ name: string; notes: string }>
+  } = {}
 ): string {
   const others = roster.filter((row) => row.botId !== bot.botId)
   const lines: string[] = [
@@ -134,7 +173,40 @@ function buildSystemPrompt(
       ? `You run inside a Daytona sandbox (id: \`${bot.sandboxId}\`). This is your execution environment.`
       : "You run inside a Daytona sandbox. This is your execution environment.",
     "Work step by step: take an action, observe the result (a command output, a file, the screen), and adjust.",
+    // Long-term memory. It goes in the COMMON part of the prompt — before
+    // the handoff branch's early return — because the handed-TO bot is
+    // precisely who a group will route a privately-known topic to, and it
+    // must be told where its own notes are:
+    "",
+    "## Your long-term memory",
+    "You keep personal notes at `~/MEMORY.md` in your sandbox (the file `MEMORY.md` in your home directory). They persist across chats and over days — unlike the conversation, which you only see while it lasts. Use it both ways:",
+    "- NOTE IT: when the user tells you something worth keeping — a preference, a fact about them or their project, a decision, or something shared in a private 1:1 chat — add one short, dated line, e.g. run_bash:  echo \"- 2026-11-21: prefers dark mode\" >> ~/MEMORY.md",
+    "- LOOK IT UP FIRST: when the turn is about the past (“what did I tell you about…”), or it is a group chat and the topic may have come up in a private 1:1 — run_bash:  cat ~/MEMORY.md   (or read_file “MEMORY.md”).",
+    "Your memory is only what that file and the conversation actually say. If neither covers it, say you don't remember — never invent recall. In a group, answer from your memory, but don't paste the file's contents into the group.",
   ]
+
+  if (options.teammateMemory && options.teammateMemory.length > 0) {
+    // The structural half of group recall. The user shared personal facts
+    // with individual members of the group in their 1:1s; those facts sit in
+    // THOSE members' memory files, not this bot's. This bot may well be the
+    // one asked, and a small local model told to "ask the team" will often
+    // just answer "I don't know" instead — so the facts are pulled in here,
+    // at turn start, and presented as this bot's own memory of the team's
+    // private knowledge. The `ask_teammate_memory` tool stays as the live
+    // path (a teammate may have just learned something, or its notes file
+    // holds more than the excerpt below).
+    lines.push("")
+    lines.push("## Your team's private notes")
+    lines.push(
+      "What the user has shared privately with the members of this group is kept in their notes, and those notes are yours to use too. Treat them exactly as your own long-term memory: when the user asks about something the notes cover, answer from them as if you had always known it — and never mention notes, files, other members, or where the information came from. They are simply things you know about the user."
+    )
+    for (const entry of options.teammateMemory) {
+      lines.push(`  • ${entry.name}:`)
+      for (const line of entry.notes.split("\n")) {
+        if (line.trim()) lines.push(`      ${line}`)
+      }
+    }
+  }
 
   if (options.handoffReason) {
     // A bot receiving a handoff is the one answering: no handoff tool is
@@ -151,6 +223,24 @@ function buildSystemPrompt(
         "You are the one answering — the user reads your words directly, so do the work in your own sandbox and deliver the actual answer. " +
         "Never mention routing, handoffs, or other members in your reply, and never write lines like “handed to ~”, “hang tight”, or “a teammate will…”: you ARE the responder. " +
         "If earlier messages contain such lines, they were routing chatter — do not copy that style or imitate it."
+    )
+    return lines.join("\n")
+  }
+
+  if (options.memoryQuery) {
+    // A teammate in this group asked this bot internally for a recollection
+    // (the group's "who remembers?" path). This bot is NOT conversing with
+    // the user — it supplies the fact, or a clean denial, in a line the
+    // asker can drop straight into its reply. It must not narrate the
+    // mechanism, and the asker must be able to tell "nothing" apart from
+    // "something", so the denial has one exact shape.
+    lines.push("")
+    lines.push("## A teammate is asking your memory (help them recall)")
+    lines.push(
+      `They need to know: “${options.memoryQuery}”. ` +
+        "First check your notes (run_bash: cat ~/MEMORY.md), and what this conversation itself says. " +
+        "If either has the answer, reply with ONLY the relevant fact or facts in one or two plain sentences — no greeting, no commentary, no mention of teammates, notes, or files. " +
+        "If neither does, reply exactly: NO RECOLLECTION."
     )
     return lines.join("\n")
   }
@@ -174,6 +264,7 @@ function buildSystemPrompt(
     lines.push("1. Read the user's request. Compare it against EVERY member's job AND stated purpose above, including yours. Route by what a member is actually built to do — a purpose like “write and review code” means writing code is squarely that member's lane, not just reviewing it.")
     lines.push("2. If it clearly fits ANOTHER member's job or stated purpose better than yours: hand the turn to that member with the `handoff` tool right now — name them exactly as in the list, with one line on why they fit. Do NOT do the work yourself first; do it in their lane, not yours.")
     lines.push("3. If it clearly fits YOUR job or stated purpose, or no member fits more clearly than you: answer the user yourself.")
+    lines.push("4. If it is about something you don't know and no member's job clearly covers it — especially anything personal or private: the user's pets, family, preferences, projects, plans, or things they may have told a teammate in a private 1:1 — do NOT answer “I don't know” right away, and check the team's knowledge in order: FIRST the “Your team's private notes” section above — if it covers the question, your answer is already in context, just give it. ONLY if the notes don't cover it, ask the team's memories internally: call `ask_teammate_memory` for each teammate who might have heard it (if you're unsure, each one), and give each a one-line topic. Then give the user ONE clean reply — as if you always knew it. Never reveal the checking: no “I checked with ~”, no naming a teammate, no mention of memory, notes, or files. If the notes and the asking both come up empty, say plainly that you don't remember this.")
     lines.push("")
     lines.push("Never answer a request that clearly belongs to a teammate, and never hand off a request that clearly belongs to you. When in doubt, do not hand off to someone equally or less suited — if your job is the closest match, that IS your job.")
     lines.push("Every member has its own job and its own Daytona sandbox, so the right member can do the work directly the moment it takes the turn.")
@@ -373,6 +464,35 @@ export const omnibotChat = chat.agent({
     // handoff tool. A direct chat is a single member with no one to hand to.
     const isGroup = members.length >= 2
 
+    // Group recall, structural side. The user told individual MEMBERS of this
+    // group private things in their 1:1s (their name, their project, ...);
+    // each member kept those in its OWN sandbox's MEMORY.md, so the member
+    // who happens to answer THIS turn does not know them — and a small local
+    // model told to "ask the team internally" will often just answer "I don't
+    // know" instead. So every group turn ships the other members' notes in
+    // the answering bot's system prompt, as its own long-term memory of what
+    // the user shared with the team. Direct chats skip this entirely (the one
+    // member's own memory prompt already covers its own 1:1s).
+    // Best-effort and time-capped, in parallel, and never fatal: a stopped,
+    // wedged, or dead teammate sandbox just contributes no notes — the turn
+    // still answers, and `ask_teammate_memory` remains the live path.
+    let teammateMemory: Array<{ name: string; notes: string }> = []
+    if (isGroup) {
+      const reads = Promise.all(
+        members
+          .filter((member) => member.botId !== bot.botId)
+          .map(async (member) => {
+            const notes = await readBotMemory(member.botId)
+            return notes ? { name: member.name, notes } : null
+          })
+      ).then((results) => results.filter((notes): notes is NonNullable<typeof notes> => notes !== null))
+      teammateMemory =
+        (await Promise.race([
+          reads,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 30_000)),
+        ])) ?? []
+    }
+
     // The transcript must remember WHICH bot said what: a group chat is
     // answered by whichever member the composer picked for the turn, and even
     // a direct chat's owner may want the bot's face by its reply. Stamp this
@@ -431,7 +551,10 @@ export const omnibotChat = chat.agent({
     // knows who is in the room and what each is for) and, on the answering
     // bot only, how to use the handoff tool.
     const makeModel = () => provider.createProvider(key)(modelId)
-    const system = buildSystemPrompt(bot, members, { canHandOff: isGroup })
+    const system = buildSystemPrompt(bot, members, {
+      canHandOff: isGroup,
+      teammateMemory,
+    })
 
     // The group-only handoff tool, built here rather than in the agent's
     // `tools` function because the answering bot's identity and the
@@ -446,13 +569,152 @@ export const omnibotChat = chat.agent({
     if (isGroup) {
       toolsForTurn = {
         ...tools,
+        // ----- Internal memory recall -------------------------------------
+        // The quiet team tool, group-only like `handoff`: ask a teammate to
+        // check THEIR long-term memory (what the user may have told them in
+        // a 1:1) about a topic. Unlike `handoff` the teammate does NOT take
+        // the turn — its recollection comes back into the ANSKER's context
+        // as the tool output, and the asker delivers the one final reply.
+        // Hence two deliberate omissions: no chat.forwardSubAgent (forwarding
+        // would stream the teammate's words into the message the way the
+        // handoff does — this exchange must stay internal), and no stop
+        // condition (stopAfterResolvedHandoff keys off the "handoff" tool
+        // name and ok:true, so it can't fire here — the asker must be free
+        // to combine several recollections and then speak).
+        ask_teammate_memory: tool({
+          description:
+            "Ask a teammate in this group chat to check their long-term memory about a topic — for things the user may have told them privately (in a 1:1) over time: the user's pets, family, preferences, projects, plans, personal facts. " +
+            "You stay the one answering the user: the teammate's recollection comes back to you here, and you deliver the final reply yourself. " +
+            "Use it only for recall. Do NOT use it to make a teammate do their job — for that, hand off.",
+          inputSchema: z.object({
+            targetName: z
+              .string()
+              .min(1)
+              .describe(
+                "The name of a different member bot in this chat to ask, exactly as shown in the member list above (e.g. \"David\"). Never your own name.",
+              ),
+            topic: z
+              .string()
+              .min(1)
+              .describe(
+                "One short line on what to recall, e.g. \"the user's cat's name\".",
+              ),
+          }),
+          execute: async ({ targetName, topic }, { abortSignal }) => {
+            const hit = resolveMember(members, bot.botId, targetName)
+            if (hit.kind === "missing") {
+              return {
+                ok: false,
+                error:
+                  hit.error +
+                  " Ask one of them by name, or read your own memory (run_bash: cat ~/MEMORY.md) and answer the user yourself.",
+              }
+            }
+            if (hit.target.botId === bot.botId) {
+              return {
+                ok: false,
+                error:
+                  "That is you — read your own memory instead (run_bash: cat ~/MEMORY.md).",
+              }
+            }
+
+            // The teammate answers with their OWN identity, in their OWN
+            // sandbox — so they can read their own MEMORY.md (their private
+            // 1:1 notes), which the asker cannot touch at all. The sub's
+            // prompt (the memoryQuery branch) tells them to reply with just
+            // the fact(s) or the exact sentinel "NO RECOLLECTION".
+            const targetSystem = buildSystemPrompt(hit.target, members, {
+              memoryQuery: topic,
+            })
+            const targetTools = buildComputerUseTools(chatId, hit.target.botId)
+            const sub = aiStreamText({
+              model: makeModel(),
+              system: targetSystem,
+              messages,
+              tools: targetTools,
+              // A recall is short: check the file, answer. Ten calls is far
+              // more runway than needed and still finite.
+              stopWhen: isStepCount(10),
+              abortSignal,
+              timeout: turnTimeout,
+              maxRetries: 3,
+              providerOptions: { openaiCompatible: { keep_alive: "1h" } },
+            })
+
+            // Run the sub to completion WITHOUT forwarding it: no
+            // chat.forwardSubAgent, so nothing of its stream rides to the
+            // chat UI — the recall stays internal (that is the whole point
+            // of this tool vs `handoff`). `await sub.text` is sufficient to
+            // drive the stream to completion: in ai@7 the Result's text
+            // getter self-consumes (verified in the installed
+            // createStreamResult: `get text() { consumeStream(); … }`), and
+            // it resolves with the accumulated text or rejects on a stream
+            // error — both handled here. (Notably we do NOT touch
+            // `fullStream`: once claimed it is single-access, and claiming
+            // it would be pointless without a consumer.)
+            let recollection = ""
+            try {
+              recollection = (await sub.text).trim()
+            } catch (error) {
+              console.error("[omnibot-chat] memory-query sub-agent errored:", error)
+            }
+
+            if (!recollection) {
+              return {
+                ok: false,
+                error:
+                  "The teammate could not check their memory just now. Read your own memory (run_bash: cat ~/MEMORY.md) or answer the user yourself.",
+              }
+            }
+
+            return {
+              ok: true,
+              targetName: hit.target.name,
+              recollection,
+            }
+          },
+          toModelOutput: ({ output }) => {
+            // The tool OUTPUT is a plain record — the rejection
+            // ({ ok: false, error }) or the teammate's recollection
+            // ({ ok: true, recollection }). Hand the asker a line they can
+            // act on: a fact to build into the reply, or a clean "nothing
+            // here" (the exact sentinel the receiver was told to send, so
+            // the asker never has to guess whether vague silence means
+            // "nothing" or "truncated something").
+            const record = output as
+              | { ok: false; error: string }
+              | { ok: true; targetName: string; recollection: string }
+            if (record.ok !== true) {
+              const errorText =
+                record.ok === false && typeof record.error === "string"
+                  ? record.error
+                  : "The teammate could not check their memory."
+              // `error-text` carries a plain string, not an object.
+              return { type: "error-text", value: errorText }
+            }
+            const recollection = (record.recollection ?? "").trim()
+            if (!recollection || /^no recollection/i.test(recollection)) {
+              return {
+                type: "text",
+                value: `${record.targetName} has no recollection of this.`,
+              }
+            }
+            return {
+              type: "text",
+              value: `${record.targetName} recalls: ${recollection}`,
+            }
+          },
+        }),
         handoff: tool({
           description:
             "Hand the turn to a more suitable teammate in this group chat. " +
             "Use it only when the user's request fits another member's job clearly " +
             "better than yours — name that member (use their name from the member " +
             "list), and say in one line why. After you hand off, that teammate " +
-            "takes the turn; do not keep working.",
+            "takes the turn; do not keep working. " +
+            "This delegates a JOB — to recall something a teammate may have been " +
+            "told privately, use `ask_teammate_memory` instead: their recollection " +
+            "comes back to you and you keep the reply.",
           inputSchema: z.object({
             targetName: z
               .string()
@@ -470,27 +732,19 @@ export const omnibotChat = chat.agent({
             // Validate the target against the actual members of THIS chat: a
             // handoff to a bot outside the room is rejected in words so the
             // answering bot can choose someone else (or step in itself).
-            //
-            // The model is told to name the member (the member list in the
-            // system prompt shows names, not ids), so resolve by name —
-            // case-insensitively, trimmed. We also accept a raw bot id in
-            // case a model echoes one, which keeps things robust.
-            const wanted = targetName.trim()
-            const norm = (s: string) => s.trim().toLowerCase()
-            const target = members.find(
-              (member) =>
-                norm(member.name) === norm(wanted) || member.botId === wanted
-            )
-            if (!target) {
-              const otherNames = members
-                .filter((member) => member.botId !== bot.botId)
-                .map((member) => member.name)
-                .join(", ")
+            // (Name resolution shared with `ask_teammate_memory` — see
+            // resolveMember; the model may echo a raw bot id, which is
+            // tolerated.)
+            const hit = resolveMember(members, bot.botId, targetName)
+            if (hit.kind === "missing") {
               return {
                 ok: false,
-                error: `There is no such teammate as "${targetName}". The other members in this chat are: ${otherNames}. Hand the turn to one of them by name, or answer the user yourself.`,
+                error:
+                  hit.error +
+                  " Hand the turn to one of them by name, or answer the user yourself.",
               }
             }
+            const target = hit.target
             if (target.botId === bot.botId) {
               return {
                 ok: false,

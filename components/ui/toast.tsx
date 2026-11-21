@@ -22,7 +22,14 @@ function ToastViewport({ className, ...props }: ToastPrimitive.Viewport.Props) {
     <ToastPrimitive.Viewport
       data-slot="toast-viewport"
       className={cn(
-        "pointer-events-none fixed inset-x-4 bottom-4 z-50 mx-auto w-auto max-w-sm outline-none sm:right-4 sm:left-auto sm:mx-0 sm:w-full",
+        // z-[70]: above the dialog's backdrop. The backdrop (z-50, a
+        // full-viewport layer with backdrop-blur — the blur you see behind a
+        // dialog) portals into the body AFTER the toaster, so at an equal
+        // z-index the later DOM node paints on top and the toast underneath
+        // renders through the blur. Above the backdrop it stays sharp whether
+        // a dialog is open or not. (Also above the desktop pane's
+        // z-[60] fullscreen overlay.)
+        "pointer-events-none fixed inset-x-4 bottom-4 z-[70] mx-auto w-auto max-w-sm outline-none sm:right-4 sm:left-auto sm:mx-0 sm:w-full",
         className
       )}
       {...props}

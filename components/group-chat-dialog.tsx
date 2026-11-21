@@ -4,10 +4,12 @@ import { useTransition, useState } from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useForm } from "react-hook-form"
 import { CheckIcon } from "lucide-react"
+import { useRouter } from "next/navigation"
 
 import { createGroupChat } from "@/actions/group-chat"
 import { ChatAvatar } from "@/components/chat-avatar"
 import { GroupChatAvatar } from "@/components/group-chat-avatar"
+import { awaitRendered, sidebarRowPresent } from "@/components/render-wait"
 import { Button } from "@/components/ui/button"
 import {
   DialogClose,
@@ -65,6 +67,7 @@ function GroupChatDialogForm({
   bots: GroupChatBot[]
   onSuccess: () => void
 }) {
+  const router = useRouter()
   const [serverError, setServerError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
 
@@ -96,20 +99,72 @@ function GroupChatDialogForm({
     )
   }
 
+  // Create with an honest toast lifecycle (mirror of the group editor's).
+  // The visible change is the new sidebar row, which lands one RSC re-render
+  // of the chat lists after the action commits, so a bare "Created" toast
+  // would race ahead of it: a loading toast covers the gap, the lists
+  // re-render, and only then does that same toast flip to success.
+  // `timeout: 0` stops the pending toast auto-dismissing; the swap passes an
+  // explicit timeout to re-arm it.
   function onSubmit(data: GroupChatInput) {
     startTransition(async () => {
-      const result = await createGroupChat(data)
-      if (result.ok) {
-        reset(emptyValues)
+      // The membership in join (bot-list) order — the same order the server
+      // rewrites membership in, so the row's avatar is exactly these faces,
+      // in this order.
+      const memberSeeds = selectedBots.map((bot) => bot.avatar)
+      const pending = toast.add({
+        type: "loading",
+        title: "Creating your group chat",
+        description: `Assembling ${data.name}…`,
+        timeout: 0,
+      })
+      try {
+        const result = await createGroupChat(data)
+        if (!result.ok) {
+          // Errors surface inline in the dialog, never as toasts.
+          toast.close(pending)
+          setServerError(result.error)
+          return
+        }
+        // The dialog must keep the name and the picked bots (the member
+        // preview) visible until the new row is on screen — `reset` would
+        // blank both while the button still loads. The tidy-up happens after
+        // the gate, on the way to closing, so it is never seen.
         setServerError(null)
-        toast.add({
+        // Re-render the chat lists (sidebar) from the new row first…
+        try {
+          await router.refresh()
+        } catch (refreshError) {
+          // …and hold the toast until the row (the component we created) has
+          // actually re-rendered to the saved name and membership and
+          // painted them. A refresh hiccup doesn't hang us: the wait has a
+          // ceiling, so it degrades to success (the create already committed)
+          // past the ceiling.
+          console.error(
+            "[GroupChatDialog] Refresh after create failed:",
+            refreshError
+          )
+        }
+        await awaitRendered(
+          () => sidebarRowPresent(data.name, memberSeeds),
+          "the new sidebar row"
+        )
+        toast.update(pending, {
           type: "success",
           title: `Created "${data.name}"`,
           description: `${data.botIds.length} bots will talk to you there.`,
+          timeout: 4000,
         })
+        // The change is on screen and the success toast is up — only now tidy
+        // the form (clear the name and the member picks) so the NEXT open
+        // starts clean, and close it. Batched with the close, so none of it
+        // is ever visible.
+        reset(emptyValues)
         onSuccess()
-      } else {
-        setServerError(result.error)
+      } catch (error) {
+        toast.close(pending)
+        console.error("[GroupChatDialog] Create failed:", error)
+        setServerError("Could not create your group chat. Please try again.")
       }
     })
   }

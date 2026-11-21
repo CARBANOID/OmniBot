@@ -577,7 +577,14 @@ function ChatConversation({
                       <span className="text-xs font-medium">
                         {responder.name}
                       </span>
-                      {lastMessageTyping && <TypingDots />}
+                      {/* Only the current turn's identity row waits on its
+                          first token — the dots must not ride on earlier
+                          stamps of bots that have already replied.
+                          `lastMessage` comes from this same array, so
+                          referential identity is the anchor. */}
+                      {lastMessageTyping && message === lastMessage ? (
+                        <TypingDots />
+                      ) : null}
                     </div>
                   )}
                   <MessageContent>

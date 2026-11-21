@@ -41,10 +41,42 @@ function daytona(): Daytona {
  * caller stores on the bot row (bots.sandboxId) to keep the two linked. We
  * create with defaults — no specific image, name, or resources — because
  * nothing about the bot's runtime is decided yet.
+ *
+ * The bot's long-term memory file (MEMORY.md, its home directory) is
+ * seeded at creation too, so the bot's very first turn finds it — and the
+ * create path can't diverge from the lazy recovery path in
+ * `resolveBotSandbox`. Seeding is best-effort by design (see
+ * `ensureMemoryFile`): the agent can recreate the file itself, so a hiccup
+ * here never loses a bot.
  */
 export async function createSandbox(): Promise<string> {
-  const sandbox = await daytona().create()
+  const sandbox = await started(await daytona().create())
+  await ensureMemoryFile(sandbox)
   return sandbox.id
+}
+
+/**
+ * Give the bot its long-term memory file if it lacks one: an empty
+ * `MEMORY.md` in the sandbox's home directory. The home doubles as the
+ * default working directory (a live sandbox starts in `$HOME`), which is
+ * also where this app's file tools anchor relative paths — so the
+ * `MEMORY.md` touched here and the `MEMORY.md` the agent's tools read and
+ * write are the same file, whichever tool touches it.
+ *
+ * Idempotent (it tests before it creates), and best-effort on purpose:
+ * a missing memory file is a minor gap the agent can patch with one shell
+ * command, so a failure here is logged, never thrown — it must not sink
+ * bot creation or a live turn.
+ */
+export async function ensureMemoryFile(sandbox: Sandbox): Promise<void> {
+  try {
+    await sandbox.process.executeCommand("test -f MEMORY.md || touch MEMORY.md")
+  } catch (error) {
+    console.error(
+      "[daytona] Could not ensure MEMORY.md in the bot's sandbox:",
+      error
+    )
+  }
 }
 
 /**
@@ -105,7 +137,9 @@ export async function resolveBotSandbox(botId: string): Promise<Sandbox> {
   const d = daytona()
   if (bot.sandboxId) {
     try {
-      return await started(await d.get(bot.sandboxId))
+      const sandbox = await started(await d.get(bot.sandboxId))
+      await ensureMemoryFile(sandbox)
+      return sandbox
     } catch (error) {
       if (!(error instanceof DaytonaNotFoundError)) throw error
       // Gone from the platform: drop the stale link so this call — and the
@@ -116,7 +150,37 @@ export async function resolveBotSandbox(botId: string): Promise<Sandbox> {
 
   const sandbox = await started(await d.create())
   await db.update(bots).set({ sandboxId: sandbox.id }).where(eq(bots.id, botId))
+  await ensureMemoryFile(sandbox)
   return sandbox
+}
+
+/**
+ * The contents of a bot's long-term memory file (`MEMORY.md`, its home
+ * directory), or an empty string when the file is absent, empty, or
+ * unreadable.
+ *
+ * Group recall uses this to surface what the user told ONE member in a
+ * private 1:1 to the member who actually answers the turn — the small local
+ * model behind these bots is not reliable enough to be told "check your
+ * teammate's notes" and to follow through, so the pull happens here, at turn
+ * start, structurally. That makes this read best-effort by design: a
+ * flaky teammate sandbox means "no notes from them", logged and swallowed,
+ * never a failed chat turn.
+ */
+export async function readBotMemory(botId: string): Promise<string> {
+  try {
+    const sandbox = await resolveBotSandbox(botId)
+    const response = await sandbox.process.executeCommand(
+      "cat MEMORY.md 2>/dev/null | head -c 8000",
+      undefined,
+      undefined,
+      20
+    )
+    return (response.artifacts?.stdout ?? response.result ?? "").trim()
+  } catch (error) {
+    console.error("[daytona] Could not read the bot's MEMORY.md:", error)
+    return ""
+  }
 }
 
 /**

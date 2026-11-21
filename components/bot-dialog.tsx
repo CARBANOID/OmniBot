@@ -5,9 +5,11 @@ import { nanoid } from "nanoid"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useForm } from "react-hook-form"
 import { PlusIcon, ShuffleIcon } from "lucide-react"
+import { useRouter } from "next/navigation"
 
 import { createBot } from "@/actions/bot"
 import { ChatAvatar } from "@/components/chat-avatar"
+import { awaitRendered, sidebarRowPresent } from "@/components/render-wait"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -92,6 +94,7 @@ export function BotDialogContent({ onSuccess }: { onSuccess: () => void }) {
 }
 
 function BotDialogForm({ onSuccess }: { onSuccess: () => void }) {
+  const router = useRouter()
   const [seed, setSeed] = useState(() => nanoid())
   const [serverError, setServerError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -113,21 +116,71 @@ function BotDialogForm({ onSuccess }: { onSuccess: () => void }) {
     setValue("instructions", template.instructions, { shouldValidate: true })
   }
 
+  // Create with an honest toast lifecycle (mirror of the bot editor's). The
+  // visible change is the new sidebar row, which lands one RSC re-render of
+  // the chat lists after the action commits, so a bare "ready" toast would
+  // race ahead of it: a loading toast covers the gap, the lists re-render,
+  // and only then does that same toast flip to success. `timeout: 0` stops
+  // the pending toast auto-dismissing; the swap passes an explicit timeout
+  // to re-arm it.
   function onSubmit(data: BotInput) {
     startTransition(async () => {
-      const result = await createBot({ ...data, avatar: seed })
-      if (result.ok) {
-        reset(emptyValues)
-        setSeed(nanoid())
+      const pending = toast.add({
+        type: "loading",
+        title: "Creating your bot",
+        description: `Spinning up ${data.name}'s sandbox…`,
+        timeout: 0,
+      })
+      try {
+        const result = await createBot({ ...data, avatar: seed })
+        if (!result.ok) {
+          // Errors surface inline in the dialog, never as toasts.
+          toast.close(pending)
+          setServerError(result.error)
+          return
+        }
+        // The dialog must keep showing exactly what the user submitted —
+        // name, job, face — until the new row is on screen. Clearing the
+        // form (or re-rolling the face) here would flash it to defaults
+        // while the button still loads. The tidy-up happens after the gate,
+        // on the way to closing, so it is never seen.
         setServerError(null)
-        toast.add({
+        // Re-render the chat lists (sidebar) from the new row first…
+        try {
+          await router.refresh()
+        } catch (refreshError) {
+          // …and hold the toast until the row (the component we created) has
+          // actually re-rendered to the saved name and face and painted
+          // them. A refresh hiccup doesn't hang us: the wait has a ceiling,
+          // so it degrades to success (the create already committed) past
+          // the ceiling.
+          console.error(
+            "[BotDialog] Refresh after create failed:",
+            refreshError
+          )
+        }
+        // `seed` (submitted as the bot's avatar) is the single face the new
+        // row's avatar paints, alongside the saved name.
+        await awaitRendered(
+          () => sidebarRowPresent(data.name, [seed]),
+          "the new sidebar row"
+        )
+        toast.update(pending, {
           type: "success",
           title: `${data.name} is ready`,
           description: "Your new bot was created.",
+          timeout: 4000,
         })
+        // The change is on screen and the success toast is up — only now tidy
+        // the form so the NEXT open starts clean, and close it. Batched with
+        // the close, so none of it is ever visible.
+        reset(emptyValues)
+        setSeed(nanoid())
         onSuccess()
-      } else {
-        setServerError(result.error)
+      } catch (error) {
+        toast.close(pending)
+        console.error("[BotDialog] Create failed:", error)
+        setServerError("Could not create your bot. Please try again.")
       }
     })
   }

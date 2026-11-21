@@ -9,6 +9,11 @@ import { ShuffleIcon, TrashIcon } from "lucide-react"
 
 import { deleteBot, updateBot } from "@/actions/bot"
 import { ChatAvatar } from "@/components/chat-avatar"
+import {
+  awaitRendered,
+  botHeaderRendered,
+  sidebarRowGone,
+} from "@/components/render-wait"
 import { Button } from "@/components/ui/button"
 import {
   Field,
@@ -143,42 +148,116 @@ function BotEditDialogForm({
     },
   })
 
+  // Save with an honest toast lifecycle (mirror of the group editor's). The
+  // sidebar's name and face re-render one RSC round trip after the action
+  // commits, so a bare "Saved" toast would race ahead of the change: a
+  // loading toast covers the gap, the lists re-render, and only then does
+  // that same toast flip to success. `timeout: 0` stops the pending toast
+  // auto-dismissing; the swap passes an explicit timeout to re-arm it.
   function onSubmit(data: UpdateBotInput) {
     startSubmitting(async () => {
       setServerError(null)
-      const result = await updateBot(bot.id, { ...data, avatar: seed })
-      if (result.ok) {
-        toast.add({
+      const pending = toast.add({
+        type: "loading",
+        title: "Saving bot",
+        description: `Applying changes to ${data.name}…`,
+        timeout: 0,
+      })
+      try {
+        const result = await updateBot(bot.id, { ...data, avatar: seed })
+        if (!result.ok) {
+          // Errors surface inline in the dialog, never as toasts.
+          toast.close(pending)
+          setServerError(result.error)
+          return
+        }
+        // Re-render the lists (sidebar) from the saved rows first…
+        try {
+          await router.refresh()
+        } catch (refreshError) {
+          // …and hold the toast until the header (the component we edited) has
+          // actually re-rendered to the new name and face and painted them. A
+          // refresh hiccup doesn't hang us: the wait has a ceiling, so it
+          // degrades to success (the save already committed) past the ceiling.
+          console.error(
+            "[BotEditDialog] Refresh after save failed:",
+            refreshError
+          )
+        }
+        // `seed` (set by the Shuffle button, saved as the bot's avatar) is the
+        // single face the header's avatar will paint, with the saved name.
+        await awaitRendered(
+          () => botHeaderRendered(data.name, seed),
+          "the chat header with the saved name and face"
+        )
+        toast.update(pending, {
           type: "success",
           title: "Bot updated",
           description: `${data.name} was saved.`,
+          timeout: 4000,
         })
         onSuccess()
-      } else {
-        setServerError(result.error)
+      } catch (error) {
+        console.error("[BotEditDialog] Save failed:", error)
+        toast.close(pending)
+        setServerError("Could not save your bot. Please try again.")
       }
     })
   }
 
   // Confirmation modal: deleting is irreversible, so the form's Save button
   // sits beside a Delete that requires an explicit second click to proceed.
+  // Same toast lifecycle as Save — the deletion only becomes visible after
+  // leaving, so the loading toast rides until home's fresh list is up.
   function onDelete() {
     startDeleting(async () => {
-      const result = await deleteBot(bot.id)
-      if (result.ok) {
+      const pending = toast.add({
+        type: "loading",
+        title: "Deleting bot",
+        description: `Removing ${bot.name}…`,
+        timeout: 0,
+      })
+      try {
+        const result = await deleteBot(bot.id)
+        if (!result.ok) {
+          toast.close(pending)
+          // Keep the editor open and surface the failure inline.
+          setServerError(result.error)
+          return
+        }
         setConfirmOpen(false)
-        toast.add({
+        // The chat this edited is gone (an empty direct chat is dropped with
+        // its only bot) — leave it. The URL flip is NOT the finish line: in
+        // this router `replace()` resolves before the destination has even
+        // fetched its data, so pathname alone reads true while the sidebar
+        // still shows the deleted row. Gate on the content instead — home
+        // on screen AND the bot's row actually gone — which can only be
+        // read against the freshly rendered state.
+        try {
+          await router.replace("/")
+        } catch (navigateError) {
+          console.error(
+            "[BotEditDialog] Navigation after delete failed:",
+            navigateError
+          )
+        }
+        await awaitRendered(
+          () =>
+            window.location.pathname === "/" &&
+            sidebarRowGone(bot.name, [bot.avatar]),
+          "home with the deleted bot's row gone"
+        )
+        toast.update(pending, {
           type: "success",
           title: "Bot deleted",
           description: `${bot.name} was removed.`,
+          timeout: 4000,
         })
         onDeleted?.()
-        // The chat this edited is gone (an empty direct chat is dropped with
-        // its only bot), so leave it — home re-renders the fresh chat list.
-        router.replace("/")
-      } else {
-        // Keep the editor open and surface the failure inline.
-        setServerError(result.error)
+      } catch (error) {
+        console.error("[BotEditDialog] Delete failed:", error)
+        toast.close(pending)
+        setServerError("Could not delete your bot. Please try again.")
       }
     })
   }

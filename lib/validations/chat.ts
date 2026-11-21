@@ -40,3 +40,25 @@ export const createGroupChatInputSchema = chatInsertSchema
   })
 
 export type GroupChatInput = z.infer<typeof createGroupChatInputSchema>
+
+// What a client may submit when updating an existing group chat: the new
+// name plus the full set of member bot ids — a group stays a group (named,
+// at least two bots), so the editable slice is identical to create; only the
+// server action differs (update-in-place vs insert). `id` names the row and
+// is passed separately to the action, never through the form.
+export const updateGroupChatInputSchema = chatInsertSchema
+  .omit({
+    id: true,
+    userId: true,
+    createdAt: true,
+    kind: true,
+    lastMessagePreview: true,
+    lastMessageAt: true,
+  })
+  .extend({
+    botIds: z
+      .array(z.string().min(1))
+      .min(2, "Pick at least two bots to talk to."),
+  })
+
+export type UpdateGroupChatInput = z.infer<typeof updateGroupChatInputSchema>

@@ -12,6 +12,7 @@ import {
   LOCAL_PROVIDER_COOKIE_NAME,
   MODEL_COOKIE_NAME,
 } from "@/lib/credential-cookie"
+import { getUserBots } from "@/queries/bots"
 import { getChat } from "@/queries/chat"
 import { getUserCredentials } from "@/queries/credentials"
 import { getChatTranscript } from "@/queries/transcript"
@@ -28,6 +29,10 @@ export default async function ChatPage({
 
   const { chatId } = await params
   const chat = await getChat(chatId)
+  // The pool the header's group editor offers as (potential) members — the
+  // same list the sidebar's create dialog uses. The actions re-validate
+  // ownership, so this is a convenience, not an authority.
+  const bots = await getUserBots()
   // Unknown id (or a chat another user owns) is a 404 — the query refuses
   // to leak ownership, so it simply comes back as null. This must fire
   // before any Suspense boundary further down, where it would be a
@@ -110,6 +115,12 @@ export default async function ChatPage({
             isGroup={chat.kind === "group"}
             memberSeeds={chat.members.map((member) => member.avatar)}
             bot={chat.bot}
+            group={
+              chat.kind === "group"
+                ? { id: chat.id, name: chat.name, members: chat.members }
+                : null
+            }
+            bots={bots}
           />
           <ChatWithTranscript
             chatId={chatId}
