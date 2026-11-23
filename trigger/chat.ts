@@ -1,8 +1,10 @@
 import {
   isStepCount,
+  NoSuchToolError,
   streamText as aiStreamText,
   tool,
   type StopCondition,
+  type ToolCallRepairFunction,
   type ToolSet,
 } from "ai"
 import { asc, and, eq } from "drizzle-orm"
@@ -76,6 +78,69 @@ const turnTimeout = {
   // One Daytona tool call — screenshots and most commands land well inside
   // this; it bounds a wedged one.
   toolMs: 120_000,
+}
+
+// The small local model occasionally "autocorrects" a tool name into a word
+// that does not exist (observed in production: `keybrd_press` for
+// `keyboard_press`). The AI SDK fails the whole turn with NoSuchToolError on
+// that — the user gets a partial answer, a generic error line, and the
+// partial is only persisted when the run's error path finally saves it, so a
+// refresh in that window drops the last message until the next turn. Re-issuing
+// the call under the nearest AVAILABLE tool name is a cheap fix, because the
+// real set is right there and a typo is the only thing wrong with the call.
+// Anything remotely different (`flarp` → `run_bash`) must NOT be guessed at:
+// return null and the SDK behaves exactly as it does today.
+function levenshtein(a: string, b: string): number {
+  if (a.length === 0) return b.length
+  if (b.length === 0) return a.length
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    let corner = prev[0]
+    prev[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      const upper = prev[j]
+      prev[j] = Math.min(
+        prev[j] + 1,
+        prev[j - 1] + 1,
+        corner + (a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1),
+      )
+      corner = upper
+    }
+  }
+  return prev[b.length]
+}
+
+// Nearest tool name within a small edit-distance budget (a quarter of the
+// name's length, at least 1). `null` when nothing is close enough.
+function nearestToolName(
+  misspelled: string,
+  available: string[],
+): string | null {
+  let best: string | null = null
+  let bestDistance = Math.max(1, Math.round(misspelled.length * 0.25))
+  for (const name of available) {
+    if (name === misspelled) return name
+    const distance = levenshtein(misspelled, name)
+    if (distance <= bestDistance) {
+      best = name
+      bestDistance = distance
+    }
+  }
+  return best
+}
+
+const repairToolCall: ToolCallRepairFunction<ToolSet> = async ({
+  toolCall,
+  tools,
+  error,
+}) => {
+  if (!NoSuchToolError.isInstance(error)) return null
+  const near = nearestToolName(error.toolName, Object.keys(tools))
+  if (!near) return null
+  console.warn(
+    `[omnibot-chat] repaired tool call "${error.toolName}" to "${near}"`,
+  )
+  return { ...toolCall, toolName: near }
 }
 
 // A member bot's row as the agent needs it: identity (name, job — what it
@@ -269,6 +334,25 @@ function buildSystemPrompt(
     lines.push("Never answer a request that clearly belongs to a teammate, and never hand off a request that clearly belongs to you. When in doubt, do not hand off to someone equally or less suited — if your job is the closest match, that IS your job.")
     lines.push("Every member has its own job and its own Daytona sandbox, so the right member can do the work directly the moment it takes the turn.")
   }
+
+  // Handover to the user: a bot check or CAPTCHA, a login or a payment, or a
+  // wall of personal input is not something the bot can (or should) solve —
+  // it is work for the user's hands. `wait` is the bot's one move at that
+  // wall: it has no `execute`, so the call ends the turn, the user works the
+  // desktop, and the agent resumes with the user's answer. This section sits
+  // AFTER the sub-agent early returns above on purpose — sub-agents get no
+  // wait tool, so their prompts must never name it.
+  lines.push("")
+  lines.push("## When only the user can act")
+  lines.push(
+    "Some steps are impossible for you and possible only for the user: a bot check or CAPTCHA, a login, a payment, or any input that is theirs (a code, an address, a personal choice). " +
+      "When you reach one — especially a page that is asking for exactly that input — stop what you are doing and call the `wait` tool with one clear line saying what the user should do, e.g. 'A bot check appeared — please complete it in the desktop on the right.' " +
+      "Do not guess, fabricate or force your way past it, and do not retry the blocked action in a loop: call `wait` once and stop."
+  )
+  lines.push(
+    "The call ends your turn: the user takes the desktop and works on it, and the turn resumes with their answer — done, or the issue they hit. " +
+      "On resume, first re-check the screen (view_screen) to see the state they left behind, then continue — or call `wait` again, stating the remaining blocker plainly, if it still needs them."
+  )
 
   if (options.canHandOff) {
     lines.push("")
@@ -626,12 +710,19 @@ export const omnibotChat = chat.agent({
             const targetSystem = buildSystemPrompt(hit.target, members, {
               memoryQuery: topic,
             })
-            const targetTools = buildComputerUseTools(chatId, hit.target.botId)
+            // No `wait` for the sub: a recalled fact never needs the user's
+            // hands (and a pending handover could not be answered here).
+            const targetTools = buildComputerUseTools(
+              chatId,
+              hit.target.botId,
+              { userHandoff: false }
+            )
             const sub = aiStreamText({
               model: makeModel(),
               system: targetSystem,
               messages,
               tools: targetTools,
+              repairToolCall,
               // A recall is short: check the file, answer. Ten calls is far
               // more runway than needed and still finite.
               stopWhen: isStepCount(10),
@@ -760,12 +851,19 @@ export const omnibotChat = chat.agent({
             const targetSystem = buildSystemPrompt(target, members, {
               handoffReason: reason,
             })
-            const targetTools = buildComputerUseTools(chatId, target.botId)
+            // No `wait` for the sub: a group chat has no user-facing desktop,
+            // so a pending handover there could never be answered.
+            const targetTools = buildComputerUseTools(
+              chatId,
+              target.botId,
+              { userHandoff: false }
+            )
             const sub = aiStreamText({
               model: makeModel(),
               system: targetSystem,
               messages,
               tools: targetTools,
+              repairToolCall,
               stopWhen: isStepCount(40),
               abortSignal,
               timeout: turnTimeout,
@@ -897,6 +995,10 @@ export const omnibotChat = chat.agent({
       system,
       messages,
       tools: toolsForTurn,
+      // The AI SDK fails the whole turn when the model names a tool that does
+      // not exist (it does — `keybrd_press`); repair re-issues the call under
+      // the nearest real tool name instead (see repairToolCall).
+      repairToolCall,
       // The AI SDK caps the tool loop at ONE step by default — one model
       // call, its tools run, and over. Desktop work needs many
       // act-observe-act round trips, so the limit is lifted explicitly. 50

@@ -1,6 +1,12 @@
 "use client"
 
-import type { UIDataTypes, UIMessage, UIMessagePart, UITools } from "ai"
+import type {
+  ChatAddToolOutputFunction,
+  UIDataTypes,
+  UIMessage,
+  UIMessagePart,
+  UITools,
+} from "ai"
 import {
   BanIcon,
   CheckIcon,
@@ -8,6 +14,7 @@ import {
   FilePenLineIcon,
   FileTextIcon,
   FolderIcon,
+  HourglassIcon,
   KeyboardIcon,
   MonitorIcon,
   MouseIcon,
@@ -19,7 +26,7 @@ import {
   XIcon,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { MessageResponse } from "@/components/ai-elements/message"
 import { ChatAvatar } from "@/components/chat-avatar"
@@ -30,6 +37,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { Spinner } from "@/components/ui/spinner"
+import { Textarea } from "@/components/ui/textarea"
+import { useChatShell } from "@/components/chat-shell"
 import type { ChatMemberInfo } from "@/queries/chat"
 import { cn } from "@/lib/utils"
 
@@ -411,6 +420,218 @@ function ScreenPart({ part, className }: { part: Part; className?: string }) {
 }
 
 /**
+ * A `wait` call: the bot has paused and handed the desktop to the user — a
+ * bot check, a login, an input it must not guess. The tool has no `execute`
+ * on purpose: this card is the only thing that answers it.
+ *
+ * While pending (no output yet) the card shows the bot's reason and the two
+ * answers the user can give:
+ *   ✓ Done — the step is handled      → { done: true }
+ *   ✗ Issue — what is still wrong     → { done: false, issue }
+ * The answer is supplied with `addToolOutput`, which patches this part to
+ * `output-available`; the chat's `sendAutomaticallyWhen` then starts the
+ * next turn, and the bot picks up with the user's word as the tool result.
+ *
+ * State lives on the part itself (transcript-persisted), so the card is
+ * reload-safe: a pending card re-appears after a refresh and stays
+ * answerable, an answered one shows its outcome.
+ *
+ * A pending card also brings the desktop to the front — the chat shell's
+ * right panel, via its context. In a group chat that context is a no-op
+ * (no desktop pane exists), so the same code is a harmless do-nothing there.
+ */
+export function WaitPart({
+  part,
+  className,
+  addToolOutput,
+  disabled,
+}: {
+  part: Part
+  className?: string
+  addToolOutput?: ChatAddToolOutputFunction<UIMessage>
+  disabled?: boolean
+}) {
+  const inv = asInvocation(part)
+  const input = asRecord(inv.input)
+  const reason =
+    typeof input.reason === "string" && input.reason.length > 0
+      ? input.reason
+      : "I have stopped where I need your help."
+  const toolCallId =
+    typeof (part as { toolCallId?: unknown }).toolCallId === "string"
+      ? ((part as { toolCallId: string }).toolCallId)
+      : undefined
+
+  // Pending until the user's answer lands on the part: everything except an
+  // outcome (output-available, or a failed/denied delivery of the answer).
+  const pending =
+    inv.state !== "output-available" &&
+    inv.state !== "output-error" &&
+    inv.state !== "output-denied"
+
+  const [issueOpen, setIssueOpen] = useState(false)
+  const [issueText, setIssueText] = useState("")
+  const [answered, setAnswered] = useState(false)
+  const { panelOpen, togglePanel } = useChatShell()
+  // Expand the desktop panel exactly once per pending card (not on every
+  // re-render, so a user who collapses it again is not fought back out).
+  const extendedRef = useRef(false)
+  useEffect(() => {
+    if (pending && !panelOpen && !extendedRef.current) {
+      extendedRef.current = true
+      togglePanel()
+    }
+  }, [pending, panelOpen, togglePanel])
+
+  // The turn may be in flight (another bot answering around us, an auto-sent
+  // continuation starting) or the card may have just been answered — all of
+  // those freeze the buttons.
+  const lock = disabled || answered || addToolOutput === undefined
+
+  const answer = (output: { done: boolean; issue?: string }) => {
+    if (lock || toolCallId === undefined) return
+    setAnswered(true)
+    addToolOutput({ tool: "wait", toolCallId, output })
+  }
+
+  const header = (
+    <div className="flex items-start gap-2.5">
+      <HourglassIcon className="mt-0.5 size-4 shrink-0 text-amber-600" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">I need a hand</p>
+        <p className="break-words text-sm text-muted-foreground">{reason}</p>
+      </div>
+    </div>
+  )
+
+  // --- Answered (or the delivery of the answer failed): record the outcome ---
+  if (!pending) {
+    if (inv.state === "output-error" || inv.state === "output-denied") {
+      return (
+        <div className={cn("rounded-md border p-3", className)}>
+          {header}
+          <p className="mt-2 flex items-start gap-1.5 text-xs text-destructive">
+            <XIcon className="mt-px size-3.5 shrink-0" />
+            <span>
+              {typeof inv.errorText === "string" && inv.errorText.length > 0
+                ? inv.errorText
+                : "The answer could not be delivered."}
+            </span>
+          </p>
+        </div>
+      )
+    }
+    const outcome = asRecord(inv.output)
+    const done = outcome.done === true
+    const issue =
+      typeof outcome.issue === "string" && outcome.issue.length > 0
+        ? outcome.issue
+        : undefined
+    return (
+      <div className={cn("rounded-md border p-3", className)}>
+        {header}
+        {done ? (
+          <p className="mt-2 flex items-center gap-1.5 text-sm text-green-600">
+            <CheckIcon className="size-4 shrink-0" />
+            <span>
+              Done — that is passed along and the bot is back to work.
+            </span>
+          </p>
+        ) : (
+          <div className="mt-2 space-y-1">
+            <p className="flex items-center gap-1.5 text-sm text-destructive">
+              <XIcon className="size-4 shrink-0" />
+              <span>Not finished yet</span>
+            </p>
+            {issue ? (
+              <p className="break-words pl-5.5 text-sm text-muted-foreground">
+                {issue}
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // --- Pending: the bot is stopped, the desktop is the user's ----------------
+  return (
+    <div
+      className={cn(
+        "space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-3",
+        className
+      )}
+    >
+      {header}
+      <p className="text-xs text-muted-foreground">
+        Work with the desktop on the right; when you are done (or can tell me
+        what is still wrong), let me know here.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          disabled={lock}
+          onClick={() => answer({ done: true })}
+          size="sm"
+          variant="outline"
+        >
+          <CheckIcon className="size-4" />
+          Done — I handled it
+        </Button>
+        {!issueOpen ? (
+          <Button
+            disabled={lock}
+            onClick={() => setIssueOpen(true)}
+            size="sm"
+            variant="outline"
+          >
+            <XIcon className="size-4" />
+            Still an issue
+          </Button>
+        ) : null}
+      </div>
+      {issueOpen ? (
+        <form
+          className="space-y-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (issueText.trim().length === 0) return
+            answer({ done: false, issue: issueText.trim() })
+          }}
+        >
+          <Textarea
+            autoFocus
+            className="min-h-16 text-sm"
+            disabled={lock}
+            placeholder="Tell me what is still wrong (e.g. 'the CAPTCHA keeps rejecting me')"
+            value={issueText}
+            onChange={(event) => setIssueText(event.target.value)}
+          />
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              disabled={lock}
+              size="sm"
+              type="button"
+              variant="ghost"
+              onClick={() => setIssueOpen(false)}
+            >
+              Keep waiting
+            </Button>
+            <Button
+              disabled={lock || issueText.trim().length === 0}
+              size="sm"
+              type="submit"
+            >
+              <XIcon className="size-4" />
+              Send the issue
+            </Button>
+          </div>
+        </form>
+      ) : null}
+    </div>
+  )
+}
+
+/**
  * One message part: a tool call or nothing at all. Non-tool parts (text,
  * reasoning, …) render nothing — they are handled where the message is
  * mapped. `view_screen` is the model's own look at the screen and is
@@ -419,9 +640,15 @@ function ScreenPart({ part, className }: { part: Part; className?: string }) {
 export function ChatToolPart({
   part,
   className,
+  // Only needed for `wait` (the part the USER answers); every other tool
+  // call ignores both.
+  addToolOutput,
+  disabled,
 }: {
   part: Part
   className?: string
+  addToolOutput?: ChatAddToolOutputFunction<UIMessage>
+  disabled?: boolean
 }) {
   const type = part.type
   if (typeof type !== "string" || !type.startsWith("tool-")) return null
@@ -429,6 +656,16 @@ export function ChatToolPart({
   if (toolName === "view_screen") return null
   if (toolName === "show_screen") {
     return <ScreenPart className={className} part={part} />
+  }
+  if (toolName === "wait") {
+    return (
+      <WaitPart
+        addToolOutput={addToolOutput}
+        className={className}
+        disabled={disabled}
+        part={part}
+      />
+    )
   }
   return <ToolRow className={className} part={part} toolName={toolName} />
 }

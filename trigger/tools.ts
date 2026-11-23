@@ -192,10 +192,16 @@ const MAX_LIST_ENTRIES = 500 // rows returned by list_files
  * `botId` names the answering bot's sandbox (a group chat's per-turn pick,
  * validated against the chat's membership before it gets here). Without it
  * the set falls back to the chat's default bot (first-joined member).
+ *
+ * `userHandoff` (default true) switches the `wait` tool in and out. It is
+ * out for group sub-agents: a group chat has no user-facing desktop, so a
+ * pending handover there could never be answered — the tool is withheld
+ * from the model rather than letting it call into a dead end.
  */
 export function buildComputerUseTools(
   chatId: string,
-  botId: string | null = null
+  botId: string | null = null,
+  options: { userHandoff?: boolean } = {}
 ): ToolSet {
   // The sandbox is a bot thing: cache it where it actually lives (the bot
   // row), or lazily resolve the chat's default bot behind the chat id.
@@ -676,5 +682,67 @@ export function buildComputerUseTools(
         }
       },
     }),
+
+    // ----- Handing the desktop to the user ---------------------------------
+    // A tool without `execute` on purpose: when the model calls it, the turn
+    // ends with the call still pending and the ONE who supplies the result is
+    // the user — the chat card asks them (Done, or the issue they hit), the
+    // answer is supplied client-side (addToolOutput) and resumes the agent as
+    // the next turn. Declaring it on the agent (as here, in the set the
+    // agent's `tools` returns) is what also gets toModelOutput applied when
+    // the SDK re-converts saved history on later turns.
+    ...(options.userHandoff === false
+      ? {}
+      : {
+          wait: tool({
+            description:
+              "Pause and hand the desktop over to the user. " +
+              "Call this the moment the task stops at something only the user can do — " +
+              "a bot check or CAPTCHA, a login, a payment, or any input you do not have and must not guess. " +
+              "Do not loop on a blocked action; call wait once and stop. " +
+              "The turn ends at the call: the user works on the desktop themselves, and it resumes with their answer (done, or the issue they hit).",
+            inputSchema: z.object({
+              reason: z
+                .string()
+                .min(1)
+                .describe(
+                  "One clear line telling the user what to do, e.g. 'A bot check appeared — please complete it in the desktop on the right.'"
+                ),
+            }),
+            outputSchema: z.object({
+              done: z
+                .boolean()
+                .describe(
+                  "true when the user completed the step; false when they hit an issue"
+                ),
+              issue: z
+                .string()
+                .optional()
+                .describe(
+                  "What the user says is still wrong (present when done is false)"
+                ),
+            }),
+            // Present the raw answer to the model as an instruction — the
+            // shape small models follow reliably.
+            toModelOutput: ({ output }) => {
+              const answer = output as { done?: boolean; issue?: string }
+              if (answer?.done) {
+                return {
+                  type: "text",
+                  value:
+                    "The user confirms they completed it. Re-check the screen (view_screen) and continue the task from where it left off.",
+                }
+              }
+              return {
+                type: "text",
+                value:
+                  `The user says they could NOT complete it. Their note: ${
+                    answer?.issue ?? "(no details given)"
+                  }. ` +
+                  "Read that carefully and act on it — work around it if you can, otherwise call wait again with the remaining blocker stated plainly.",
+              }
+            },
+          }),
+        }),
   }
 }

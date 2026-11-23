@@ -7,7 +7,10 @@ import {
   useSubAgentMessages,
   useTriggerChatTransport,
 } from "@trigger.dev/sdk/chat/react"
-import type { UIMessage } from "ai"
+import {
+  lastAssistantMessageIsCompleteWithToolCalls,
+  type UIMessage,
+} from "ai"
 import { useCallback, useEffect, useMemo, useState } from "react"
 
 import {
@@ -40,6 +43,7 @@ import {
   ChatReasoningPart,
   ChatToolPart,
   HandoffPart,
+  WaitPart,
 } from "@/components/chat-tools"
 import { GroupChatAvatar } from "@/components/group-chat-avatar"
 import { CredentialEditButton } from "@/components/credentials/credential-edit-button"
@@ -433,6 +437,7 @@ function ChatConversation({
     error,
     stop: aiStop,
     sendMessage,
+    addToolOutput,
   } = useChat({
     id: chatId,
     transport,
@@ -441,6 +446,12 @@ function ChatConversation({
     // Feed every data chunk to the sub-agent builder so handoff replies
     // render live while their tool call is still in flight.
     onData: subAgents.onData,
+    // A `wait` call leaves a tool invocation pending, and the USER is the
+    // one supplying its result (the card's Done / issue buttons feed
+    // addToolOutput). Once every pending call in the last assistant message
+    // has an output, this re-sends the chat and the agent resumes with the
+    // user's answer as the tool result.
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
   })
 
   // `useChat`'s `messages` array can momentarily contain the same logical
@@ -616,6 +627,17 @@ function ChatConversation({
                         members={members}
                         subAgentGet={subAgents.get}
                         isGenerating={isGenerating}
+                      />
+                    ) : part.type === "tool-wait" ? (
+                      // The bot has paused and handed the desktop to the
+                      // user; the answer (Done, or the issue) is given right
+                      // here. A pending call survives a reload — its state
+                      // lives on this persisted part.
+                      <WaitPart
+                        key={`${message.id}-${i}`}
+                        addToolOutput={addToolOutput}
+                        disabled={isGenerating || !ready}
+                        part={part}
                       />
                     ) : part.type.startsWith("tool-") ? (
                       <ChatToolPart key={`${message.id}-${i}`} part={part} />
