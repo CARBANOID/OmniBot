@@ -40,6 +40,16 @@ export default function RootLayout({
         geist.variable
       )}
     >
+      <head>
+        {/* Re-apply the user's background tint (components/theme-tint-dialog.tsx)
+            before first paint — without it, a reload with a saved tint would
+            flash the untouched background until the dialog's effect runs. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=JSON.parse(localStorage.getItem("omnibot:bg-tint"));if(!t)return;var r=document.documentElement;if(typeof t.color==="string"&&typeof t.alpha==="number"&&t.alpha>0){r.style.setProperty("--bg-tint",t.color);r.style.setProperty("--bg-tint-alpha",t.alpha)}else{r.style.removeProperty("--bg-tint");r.style.removeProperty("--bg-tint-alpha")}}catch(_){}})();`,
+          }}
+        />
+      </head>
       <body>
         <ClerkProvider appearance={{ theme: shadcn }}>
           <ThemeProvider>

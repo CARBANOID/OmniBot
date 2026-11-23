@@ -8,6 +8,7 @@
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: var(--font-sans);
+    --color-canvas: var(--canvas);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -94,11 +95,13 @@
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
     --radius: 0.625rem;
+    /* Overridden below to track --canvas — the base is only the
+       fallback if that rule is ever removed. Same for the dark theme. */
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
     --sidebar-primary: oklch(0.205 0 0);
     --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-base: oklch(0.97 0 0);
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
@@ -129,14 +132,46 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
+    /* Overridden below to track --canvas (see the light theme note). */
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.488 0.243 264.376);
     --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-base: oklch(0.269 0 0);
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* User-selected background tint (components/theme-tint-dialog.tsx). The
+   dialog writes `--bg-tint` (a hex color) and `--bg-tint-alpha` (0–1) onto
+   <html>; `--canvas` is then the theme background blended with that tone.
+   Only the CANVAS carries the tint — the page body, the bot-selection
+   sidebar, the desktop pane, the noVNC letterbox — while `--background`
+   stays the neutral theme surface, so white components (outline buttons,
+   inputs, tabs, field separators) never pick up the hue. Defaults
+   (nothing set) leave the tint at 0%, so the canvas shows the theme
+   background; removing the properties restores it. */
+:root,
+.dark {
+    --bg-tint: transparent;
+    --bg-tint-alpha: 0;
+    --canvas: color-mix(
+        in oklab,
+        var(--bg-tint) calc(var(--bg-tint-alpha) * 100%),
+        var(--background)
+    );
+    /* The sidebar's own base sits 1.5% darker (light) / lighter (dark)
+       than --background, so a tinted sidebar would read as a different
+       shade than the rest of the canvas. Share the exact same value
+       instead — the row hover/active state and the border still provide
+       the separation the sidebar needs. */
+    --sidebar: var(--canvas);
+    --sidebar-accent: color-mix(
+        in oklab,
+        var(--bg-tint) calc(var(--bg-tint-alpha) * 100%),
+        var(--sidebar-accent-base)
+    );
 }
 
 @layer base {
@@ -144,7 +179,7 @@
     @apply border-border outline-ring/50;
     }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-canvas text-foreground;
     }
   html {
     @apply font-sans;
@@ -165,12 +200,12 @@
      wrapper's background once, at connect time — a snapshot of the theme in
      effect then, or its default rgb(40,40,40) — and inline styles ignore
      later theme flips. Pin the live design token instead: !important beats
-     the inline write no matter when it happened, and var(--background)
+     the inline write no matter when it happened, and var(--canvas)
      re-resolves the instant next-themes toggles .dark on <html>. So the
      full-screen letterbox follows the current theme even on a session that
      connected under the other one — no reconnect required. */
   [data-vnc-root] > div:first-of-type {
-    background: var(--background) !important;
+    background: var(--canvas) !important;
     }
 }
 

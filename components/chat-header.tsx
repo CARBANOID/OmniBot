@@ -3,6 +3,7 @@
 import { MonitorIcon } from "lucide-react"
 
 import { useChatShell } from "@/components/chat-shell"
+import { ThemeTintDialog } from "@/components/theme-tint-dialog"
 import { BotEditDialog } from "@/components/bot-edit-dialog"
 import { GroupChatAvatar } from "@/components/group-chat-avatar"
 import { GroupEditDialog } from "@/components/group-edit-dialog"
@@ -84,6 +85,10 @@ export function ChatHeader({
       ) : (
         <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{name}</h1>
       )}
+      {/* Background tint settings: pick a tone color and its opacity (see
+          components/theme-tint-dialog.tsx). Sits to the left of the desktop
+          icon. */}
+      <ThemeTintDialog className="ml-auto" />
       {/* The desktop-app entry point: shows/hides the shell's right panel.
           Pressed (open) it reads as "close the panel". */}
       <Button
@@ -92,7 +97,6 @@ export function ChatHeader({
         size="icon"
         aria-label={panelOpen ? "Close the desktop panel" : "Open the desktop panel"}
         aria-pressed={panelOpen}
-        className="ml-auto"
         onClick={togglePanel}
       >
         <MonitorIcon />

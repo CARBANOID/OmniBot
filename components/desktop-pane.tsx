@@ -330,7 +330,10 @@ export function DesktopPane({
       <section
         aria-label={screenLabel}
         className={cn(
-          "flex h-full min-w-0 flex-col overflow-hidden bg-background",
+          // `bg-canvas` (not `bg-background`): the canvas carries the
+          // user's background tint; `--background` stays the neutral
+          // surface color of white components.
+          "flex h-full min-w-0 flex-col overflow-hidden bg-canvas",
           // Full screen: pin above the dialog's backdrop, cover the viewport.
           fullscreen && "fixed inset-0 z-[60]"
         )}
@@ -436,7 +439,7 @@ export function DesktopPane({
                   className="absolute inset-0"
                 />
                 {showOverlay && (
-                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background p-6 text-center">
+                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-canvas p-6 text-center">
                     {phase === "lost" ? (
                       <>
                         <p className="max-w-xs text-sm text-muted-foreground">
